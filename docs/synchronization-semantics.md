@@ -6,9 +6,17 @@ DevSync compares local and remote commit ancestry before filesystem synchronizat
 
 ```text
 0 0 -> equal, safe to sync
-3 0 -> local ahead, safe to push then sync
-0 2 -> remote ahead, safe to fast-forward pull then sync
+3 0 -> local ahead, abort; synchronize Git history manually
+0 2 -> remote ahead, abort; synchronize Git history manually
 2 4 -> diverged, abort
+```
+
+DevSync does not pull from or push to the peer workspace clone. The remote workspace repository is another working clone, not canonical Git authority. Use normal Git commands against canonical remotes such as `origin` to make local and remote workspace HEADs equal before running `devsync sync`.
+
+Example remediation for a typical remote-ahead local repository:
+
+```bash
+git pull --ff-only origin main
 ```
 
 ## `.git` Is Never Synchronized

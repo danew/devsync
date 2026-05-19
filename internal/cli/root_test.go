@@ -61,7 +61,7 @@ func TestWritePlanDryRunDoesNotMutate(t *testing.T) {
 	var out bytes.Buffer
 	writePlan(&out, plan.FromReport(report, true))
 	text := out.String()
-	for _, expected := range []string{"Dry run plan:", "push main", "create Mutagen session", "verify post-flush health"} {
+	for _, expected := range []string{"Dry run plan:", "manual Git history synchronization required", "create Mutagen session", "verify post-flush health"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("expected plan to contain %q, got:\n%s", expected, text)
 		}

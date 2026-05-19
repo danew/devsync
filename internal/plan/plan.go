@@ -9,11 +9,10 @@ import (
 type Kind string
 
 const (
-	Check       Kind = "check"
-	GitMutation Kind = "git"
-	MutagenOp   Kind = "mutagen"
-	Lock        Kind = "lock"
-	Reconcile   Kind = "reconcile"
+	Check     Kind = "check"
+	MutagenOp Kind = "mutagen"
+	Lock      Kind = "lock"
+	Reconcile Kind = "reconcile"
 )
 
 type Operation struct {
@@ -37,9 +36,9 @@ func FromReport(report status.Report, dryRun bool) Plan {
 	}
 	switch {
 	case report.Compare.LocalAhead > 0:
-		ops = append(ops, Operation{Kind: GitMutation, Description: fmt.Sprintf("push %s to %s", report.Local.Branch, report.Config.Remote.Target.RenderGit(report.Config.Remote.Path)), Mutates: true})
+		ops = append(ops, Operation{Kind: Check, Description: fmt.Sprintf("manual Git history synchronization required: local %s is ahead of remote workspace", report.Local.Branch), Mutates: false})
 	case report.Compare.RemoteAhead > 0:
-		ops = append(ops, Operation{Kind: GitMutation, Description: fmt.Sprintf("pull %s from %s with --ff-only", report.Local.Branch, report.Config.Remote.Target.RenderGit(report.Config.Remote.Path)), Mutates: true})
+		ops = append(ops, Operation{Kind: Check, Description: fmt.Sprintf("manual Git history synchronization required: remote workspace %s is ahead of local", report.Local.Branch), Mutates: false})
 	default:
 		ops = append(ops, Operation{Kind: Check, Description: "no Git ref update required", Mutates: false})
 	}

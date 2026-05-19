@@ -54,6 +54,12 @@ func Evaluate(ws workspace.Workspace, cfg workspace.Config, local git.State, rem
 	case comparison.LocalAhead > 0 && comparison.RemoteAhead > 0:
 		report.Action = "workspace histories diverged; resolve manually before syncing"
 		report.Err = apperrors.New(apperrors.ErrHistoryDiverged, report.Action)
+	case comparison.LocalAhead > 0:
+		report.Action = "local workspace contains commits not present remotely; synchronize Git history manually using canonical Git remotes before running sync"
+		report.Err = apperrors.NewWithRemedy(apperrors.ErrHistoryOutOfSync, report.Action, "push or otherwise publish commits with your repository's canonical remote, then update the remote workspace manually")
+	case comparison.RemoteAhead > 0:
+		report.Action = "remote workspace contains commits not present locally; synchronize Git history manually using canonical Git remotes before running sync"
+		report.Err = apperrors.NewWithRemedy(apperrors.ErrHistoryOutOfSync, report.Action, "for a typical origin/main setup: git pull --ff-only origin main")
 	case reconciliation.Needed:
 		report.Action = "mutagen session configuration drift detected; inspect and recreate manually if intended"
 		report.Err = apperrors.NewWithRemedy(apperrors.ErrSessionDrift, report.Action, reconciliation.Remedy)
@@ -63,12 +69,6 @@ func Evaluate(ws workspace.Workspace, cfg workspace.Config, local git.State, rem
 	case sync.Exists && !sync.Healthy:
 		report.Action = "mutagen session is unhealthy; inspect synchronization problems before syncing"
 		report.Err = apperrors.NewWithRemedy(apperrors.ErrMutagenUnhealthy, report.Action, "run devsync doctor and mutagen sync list "+sync.SessionName)
-	case comparison.LocalAhead > 0:
-		report.Safe = true
-		report.Action = "safe to push local commits before synchronization"
-	case comparison.RemoteAhead > 0:
-		report.Safe = true
-		report.Action = "safe to pull remote commits before synchronization"
 	default:
 		report.Safe = true
 		report.Action = "safe to synchronize working tree changes"

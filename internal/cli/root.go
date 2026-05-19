@@ -285,44 +285,6 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 	}()
 	logger.Debug("sync.lock_acquired", map[string]string{"workspace": report.Config.Workspace.Name})
 
-	gitMutated := false
-	switch {
-	case report.Compare.LocalAhead > 0:
-		started := time.Now()
-		if err := git.CheckRemoteBranchVisible(syncCtx, devssh.Runner{Target: report.Config.Remote.Target}, report.Config.Remote.Path, report.Local.Branch); err != nil {
-			return err
-		}
-		fmt.Fprintln(out)
-		gitRemote := report.Config.Remote.Target.RenderGit(report.Config.Remote.Path)
-		fmt.Fprintf(out, "Git: pushing %s to %s\n", report.Local.Branch, gitRemote)
-		if err := git.PushBranch(syncCtx, report.Workspace.Root, gitRemote, "", report.Local.Branch); err != nil {
-			return err
-		}
-		logger.Debug("sync.git_push", map[string]string{"duration": time.Since(started).String()})
-		gitMutated = true
-	case report.Compare.RemoteAhead > 0:
-		started := time.Now()
-		if err := git.CheckRemoteBranchVisible(syncCtx, devssh.Runner{Target: report.Config.Remote.Target}, report.Config.Remote.Path, report.Local.Branch); err != nil {
-			return err
-		}
-		fmt.Fprintln(out)
-		gitRemote := report.Config.Remote.Target.RenderGit(report.Config.Remote.Path)
-		fmt.Fprintf(out, "Git: pulling %s from %s with --ff-only\n", report.Local.Branch, gitRemote)
-		if err := git.PullBranchFastForward(syncCtx, report.Workspace.Root, gitRemote, "", report.Local.Branch); err != nil {
-			return err
-		}
-		logger.Debug("sync.git_pull", map[string]string{"duration": time.Since(started).String()})
-		gitMutated = true
-	}
-	if gitMutated {
-		report, err = buildStatus(syncCtx)
-		if err != nil {
-			return err
-		}
-		if !report.Safe {
-			return report.Err
-		}
-	}
 	if err := confirmInitialSync(out, report); err != nil {
 		return err
 	}

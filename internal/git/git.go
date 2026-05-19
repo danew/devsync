@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -69,7 +70,39 @@ func InspectLocal(ctx context.Context, root string) (State, error) {
 		return State{}, err
 	}
 	entries := splitLines(dirty)
+	TraceLocalRefs(ctx, root, "inspect", branch)
 	return State{Branch: branch, Head: head, Dirty: len(entries) > 0, DirtyEntries: entries}, nil
+}
+
+func TraceLocalRefs(ctx context.Context, root string, phase string, branch string) {
+	if os.Getenv("DEVSYNC_TRACE") == "" {
+		return
+	}
+	if branch == "" {
+		branch, _ = gitOutput(ctx, root, "branch", "--show-current")
+	}
+	upstream, upstreamErr := gitOutput(ctx, root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	head, headErr := gitOutput(ctx, root, "rev-parse", "HEAD")
+	upstreamHead := ""
+	if upstreamErr == nil && upstream != "" {
+		upstreamHead, _ = gitOutput(ctx, root, "rev-parse", upstream)
+	}
+	fetchHead := readFetchHead(ctx, root)
+	fields := []string{
+		"level=trace",
+		"event=git.upstream." + phase,
+		"branch=" + quoteLog(branch),
+		"upstream=" + quoteLog(upstream),
+		"upstream_head=" + quoteLog(upstreamHead),
+		"fetch_head=" + quoteLog(fetchHead),
+	}
+	if headErr == nil {
+		fields = append(fields, "head="+quoteLog(head))
+	}
+	if upstreamErr != nil {
+		fields = append(fields, "upstream_error="+quoteLog(upstreamErr.Error()))
+	}
+	fmt.Fprintln(os.Stderr, strings.Join(fields, " "))
 }
 
 func CaptureOrigin(ctx context.Context, root string) (*RemoteConfig, error) {
@@ -293,58 +326,6 @@ func CompareHistoriesWithRunner(ctx context.Context, localRoot, localHead string
 	return comparison
 }
 
-func PushBranch(ctx context.Context, root, remoteHost, remotePath, branch string) error {
-	if err := ValidateMutationReadiness(ctx, root, branch); err != nil {
-		return err
-	}
-	remote := GitRemoteURL(remoteHost, remotePath)
-	_, err := runGit(ctx, root, "push", remote, branch+":"+branch)
-	if err != nil {
-		return fmt.Errorf("push local commits to remote branch: %w", err)
-	}
-	return nil
-}
-
-func PullBranchFastForward(ctx context.Context, root, remoteHost, remotePath, branch string) error {
-	if err := ValidateMutationReadiness(ctx, root, branch); err != nil {
-		return err
-	}
-	remote := GitRemoteURL(remoteHost, remotePath)
-	_, err := runGit(ctx, root, "pull", "--ff-only", remote, branch)
-	if err != nil {
-		return fmt.Errorf("pull remote commits with fast-forward only: %w", err)
-	}
-	return nil
-}
-
-func ValidateMutationReadiness(ctx context.Context, root, expectedBranch string) error {
-	state, err := InspectLocal(ctx, root)
-	if err != nil {
-		return err
-	}
-	if state.Branch == "" {
-		return apperrors.NewWithRemedy(apperrors.ErrDetachedHead, "local repository is in detached HEAD state", "checkout a branch before running devsync sync")
-	}
-	if state.Branch != expectedBranch {
-		return apperrors.NewWithRemedy(apperrors.ErrBranchMismatch, fmt.Sprintf("current branch changed during sync: expected %s, got %s", expectedBranch, state.Branch), "rerun devsync status and retry after branch state is stable")
-	}
-	return nil
-}
-
-func CheckRemoteBranchVisible(ctx context.Context, runner devssh.Runner, path, expectedBranch string) error {
-	state, err := InspectRemote(ctx, runner, path)
-	if err != nil {
-		return err
-	}
-	if state.Branch == "" {
-		return apperrors.NewWithRemedy(apperrors.ErrDetachedHead, "remote repository is in detached HEAD state", "checkout the matching branch on the remote repository")
-	}
-	if state.Branch != expectedBranch {
-		return apperrors.NewWithRemedy(apperrors.ErrBranchMismatch, fmt.Sprintf("remote branch changed during sync: expected %s, got %s", expectedBranch, state.Branch), "rerun devsync status and retry after branch state is stable")
-	}
-	return nil
-}
-
 func GitRemoteURL(host, path string) string {
 	if path == "" {
 		return host
@@ -361,6 +342,19 @@ func compareLocal(ctx context.Context, root, localHead, remoteHead string) (Comp
 }
 
 func runGit(ctx context.Context, root string, args ...string) (string, error) {
+	traceGitCommand(root, "start", args, "", nil)
+	if isTransportMutation(args) {
+		TraceLocalRefs(ctx, root, "before", "")
+	}
+	out, err := gitOutput(ctx, root, args...)
+	if isTransportMutation(args) {
+		TraceLocalRefs(ctx, root, "after", "")
+	}
+	traceGitCommand(root, "exit", args, out, err)
+	return out, err
+}
+
+func gitOutput(ctx context.Context, root string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = root
 	var stderr bytes.Buffer
@@ -370,6 +364,58 @@ func runGit(ctx context.Context, root string, args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func traceGitCommand(root string, phase string, args []string, stdout string, err error) {
+	if os.Getenv("DEVSYNC_TRACE") == "" {
+		return
+	}
+	fields := []string{
+		"level=trace",
+		"event=git.command",
+		"phase=" + quoteLog(phase),
+		"root=" + quoteLog(root),
+		"command=" + quoteLog("git "+strings.Join(args, " ")),
+	}
+	if stdout != "" && isTransportInspection(args) {
+		fields = append(fields, "stdout="+quoteLog(stdout))
+	}
+	if err != nil {
+		fields = append(fields, "error="+quoteLog(err.Error()))
+	}
+	fmt.Fprintln(os.Stderr, strings.Join(fields, " "))
+}
+
+func isTransportMutation(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	return args[0] == "fetch" || args[0] == "pull" || args[0] == "push"
+}
+
+func isTransportInspection(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	if args[0] == "fetch" || args[0] == "pull" || args[0] == "push" {
+		return true
+	}
+	return len(args) >= 2 && args[0] == "remote" && (args[1] == "-v" || args[1] == "get-url")
+}
+
+func readFetchHead(ctx context.Context, root string) string {
+	path, err := gitOutput(ctx, root, "rev-parse", "--git-path", "FETCH_HEAD")
+	if err != nil || path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func parseRevListCount(output string) (Comparison, error) {

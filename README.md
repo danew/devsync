@@ -37,8 +37,9 @@ make build
 
 - `.git` is never synchronized.
 - Branch names must match.
-- Divergence always aborts.
+- Any local/remote history mismatch aborts.
 - Git history is authoritative.
+- DevSync never pulls from or pushes to the peer workspace clone.
 - Filesystem sync happens only after Git validation succeeds.
 - DevSync never silently recreates Mutagen sessions.
 
@@ -72,7 +73,7 @@ See `docs/examples.md` for configuration examples.
 - `devsync init-remote`: explicitly seed the remote Git repository, restore canonical `origin`, then stop before synchronization.
 - `devsync status`: inspect Git, config, Mutagen, and sync freshness.
 - `devsync sync --dry-run`: show the operation plan without mutation.
-- `devsync sync`: validate Git, reconcile session state, flush Mutagen.
+- `devsync sync`: validate Git history equality, reconcile session state, flush Mutagen.
 - `devsync doctor`: validate local and remote prerequisites.
 - `devsync session ls`: list Mutagen sync sessions.
 - `devsync session inspect`: inspect the resolved Mutagen session.

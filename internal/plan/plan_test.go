@@ -9,7 +9,7 @@ import (
 	"github.com/danew/devsync/internal/workspace"
 )
 
-func TestFromReportIncludesGitAndMutagenOperations(t *testing.T) {
+func TestFromReportDoesNotPlanGitHistoryMutation(t *testing.T) {
 	report := status.Report{
 		Config: workspace.Config{
 			Workspace: workspace.WorkspaceIdentity{Name: "steel-api"},
@@ -27,8 +27,11 @@ func TestFromReportIncludesGitAndMutagenOperations(t *testing.T) {
 	if len(plan.Ops) == 0 {
 		t.Fatal("expected operations")
 	}
-	if !contains(plan, GitMutation) || !contains(plan, MutagenOp) || !contains(plan, Lock) {
-		t.Fatalf("expected git, mutagen, and lock operations, got %#v", plan.Ops)
+	if contains(plan, Kind("git")) {
+		t.Fatalf("peer-clone history changes must not be planned as Git mutations: %#v", plan.Ops)
+	}
+	if !contains(plan, MutagenOp) || !contains(plan, Lock) {
+		t.Fatalf("expected mutagen and lock operations, got %#v", plan.Ops)
 	}
 }
 

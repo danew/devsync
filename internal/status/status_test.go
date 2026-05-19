@@ -32,11 +32,25 @@ func TestEvaluateRejectsDivergence(t *testing.T) {
 	}
 }
 
-func TestEvaluateAllowsRemoteAhead(t *testing.T) {
+func TestEvaluateRejectsRemoteAhead(t *testing.T) {
 	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "main"}, git.State{Branch: "main"}, git.Comparison{Known: true, RemoteAhead: 2}, mutagen.State{}, syncstate.State{}, mutagen.Reconciliation{})
 
-	if !report.Safe {
-		t.Fatalf("remote-ahead fast-forward should be safe: %v", report.Err)
+	if report.Safe {
+		t.Fatal("remote-ahead peer clone state must not be safe")
+	}
+	if !apperrors.Is(report.Err, apperrors.ErrHistoryOutOfSync) {
+		t.Fatalf("expected ErrHistoryOutOfSync, got %v", report.Err)
+	}
+}
+
+func TestEvaluateRejectsLocalAhead(t *testing.T) {
+	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "main"}, git.State{Branch: "main"}, git.Comparison{Known: true, LocalAhead: 2}, mutagen.State{}, syncstate.State{}, mutagen.Reconciliation{})
+
+	if report.Safe {
+		t.Fatal("local-ahead peer clone state must not be safe")
+	}
+	if !apperrors.Is(report.Err, apperrors.ErrHistoryOutOfSync) {
+		t.Fatalf("expected ErrHistoryOutOfSync, got %v", report.Err)
 	}
 }
 

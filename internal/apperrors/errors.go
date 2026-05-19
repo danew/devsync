@@ -10,6 +10,7 @@ type Kind string
 const (
 	ErrBranchMismatch         Kind = "branch mismatch"
 	ErrHistoryDiverged        Kind = "history diverged"
+	ErrHistoryOutOfSync       Kind = "history out of sync"
 	ErrHistoryUnknown         Kind = "history unknown"
 	ErrMutagenUnavailable     Kind = "mutagen unavailable"
 	ErrMutagenUnhealthy       Kind = "mutagen unhealthy"
