@@ -66,12 +66,31 @@ See `docs/examples.md` for configuration examples.
 
 ## Operational Commands
 
+- `devsync bootstrap`: validate first-run setup and create missing global config.
+- `devsync bootstrap --init-workspace`: also write `.devsync.yaml` for the current repository.
+- `devsync init --remote-host <host> --remote-path <path>`: write an explicit workspace override.
+- `devsync init-remote`: explicitly seed the remote Git repository, then stop before synchronization.
 - `devsync status`: inspect Git, config, Mutagen, and sync freshness.
 - `devsync sync --dry-run`: show the operation plan without mutation.
 - `devsync sync`: validate Git, reconcile session state, flush Mutagen.
 - `devsync doctor`: validate local and remote prerequisites.
+- `devsync session ls`: list Mutagen sync sessions.
 - `devsync session inspect`: inspect the resolved Mutagen session.
+- `devsync session flush`: flush the resolved Mutagen session.
 - `devsync session recreate --force-recreate-session`: explicitly recreate a drifted session.
+- `devsync version`: print build and runtime metadata.
+
+Global diagnostics flags:
+
+- `--debug`: emit structured debug logs.
+- `--trace`: emit verbose command-level traces for SSH, remote validation, SCP, and Mutagen endpoint rendering.
+
+Environment equivalents:
+
+```bash
+DEVSYNC_DEBUG=1 devsync status
+DEVSYNC_TRACE=1 devsync doctor
+```
 
 ## Release Builds
 
