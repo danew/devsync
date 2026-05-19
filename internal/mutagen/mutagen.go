@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -151,7 +152,9 @@ func CreateArgs(localRoot string, cfg workspace.Config) []string {
 	for _, ignore := range normalizedIgnores(cfg.Sync.Ignores) {
 		args = append(args, "--ignore", ignore)
 	}
-	args = append(args, localRoot, cfg.Remote.Host+":"+cfg.Remote.Path)
+	beta := cfg.Remote.Target.RenderMutagen(cfg.Remote.Path)
+	traceEndpoint(localRoot, beta)
+	args = append(args, localRoot, beta)
 	return args
 }
 
@@ -191,7 +194,7 @@ func Reconcile(ws workspace.Workspace, cfg workspace.Config, state State) Reconc
 	if state.Alpha != "" && state.Alpha != ws.Root {
 		reasons = append(reasons, fmt.Sprintf("local endpoint is %s, expected %s", state.Alpha, ws.Root))
 	}
-	expectedBeta := cfg.Remote.Host + ":" + cfg.Remote.Path
+	expectedBeta := cfg.Remote.Target.RenderMutagen(cfg.Remote.Path)
 	if state.Beta != "" && state.Beta != expectedBeta {
 		reasons = append(reasons, fmt.Sprintf("remote endpoint is %s, expected %s", state.Beta, expectedBeta))
 	}
@@ -204,6 +207,13 @@ func Reconcile(ws workspace.Workspace, cfg workspace.Config, state State) Reconc
 		return Reconciliation{}
 	}
 	return Reconciliation{Needed: true, Reasons: reasons, Remedy: "inspect with mutagen sync list; terminate and recreate the session only after confirming the endpoints and ignores are safe"}
+}
+
+func traceEndpoint(alpha string, beta string) {
+	if os.Getenv("DEVSYNC_TRACE") == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "level=trace event=mutagen.endpoint.rendered alpha=%q beta=%q\n", alpha, beta)
 }
 
 func normalizedIgnores(ignores []string) []string {

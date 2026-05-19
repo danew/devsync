@@ -46,3 +46,21 @@ func TestTargetSCPArgsUsesCapitalPortFlag(t *testing.T) {
 		}
 	}
 }
+
+func TestTargetRenderMutagenUsesUserHost(t *testing.T) {
+	target := Target{User: "dev", Host: "100.72.16.64"}
+	got := target.RenderMutagen("/home/dev/workspace/work/fly-metadata")
+	want := "dev@100.72.16.64:/home/dev/workspace/work/fly-metadata"
+	if got != want {
+		t.Fatalf("RenderMutagen() = %q, want %q", got, want)
+	}
+}
+
+func TestTargetRenderMutagenUsesSSHURLForPort(t *testing.T) {
+	target := Target{User: "dev", Host: "100.72.16.64", Port: "2222"}
+	got := target.RenderMutagen("/home/dev/workspace/work/fly-metadata")
+	want := "ssh://dev@100.72.16.64:2222/home/dev/workspace/work/fly-metadata"
+	if got != want {
+		t.Fatalf("RenderMutagen() = %q, want %q", got, want)
+	}
+}

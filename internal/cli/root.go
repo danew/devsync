@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -239,12 +241,22 @@ func newInitCommand() *cobra.Command {
 	return cmd
 }
 
-func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Logger) error {
+func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Logger) (err error) {
+	syncCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	defer func() {
+		if syncCtx.Err() != nil {
+			logger.Debug("sync.interrupted", map[string]string{"signal": "interrupt"})
+			if err != nil {
+				err = apperrors.NewWithRemedy(apperrors.ErrInterrupted, "sync interrupted", "lockfile released; rerun devsync status before retrying")
+			}
+		}
+	}()
 	logger.Debug("sync.start", map[string]string{"dry_run": fmt.Sprintf("%v", dryRun)})
-	if err := ensureWorkspaceConfigured(ctx, out); err != nil {
+	if err := ensureWorkspaceConfigured(syncCtx, out); err != nil {
 		return err
 	}
-	report, err := buildStatus(ctx)
+	report, err := buildStatus(syncCtx)
 	if err != nil {
 		return err
 	}
@@ -263,38 +275,45 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 	if err != nil {
 		return err
 	}
-	defer workspaceLock.Release()
+	defer func() {
+		reason := "normal"
+		if syncCtx.Err() != nil {
+			reason = "interrupt"
+		}
+		_ = workspaceLock.Release()
+		logger.Debug("lock.released", map[string]string{"workspace": report.Config.Workspace.Name, "reason": reason})
+	}()
 	logger.Debug("sync.lock_acquired", map[string]string{"workspace": report.Config.Workspace.Name})
 
 	gitMutated := false
 	switch {
 	case report.Compare.LocalAhead > 0:
 		started := time.Now()
-		if err := git.CheckRemoteBranchVisible(ctx, devssh.Runner{Target: report.Config.Remote.Target}, report.Config.Remote.Path, report.Local.Branch); err != nil {
+		if err := git.CheckRemoteBranchVisible(syncCtx, devssh.Runner{Target: report.Config.Remote.Target}, report.Config.Remote.Path, report.Local.Branch); err != nil {
 			return err
 		}
 		fmt.Fprintln(out)
 		fmt.Fprintf(out, "Git: pushing %s to %s:%s\n", report.Local.Branch, report.Config.Remote.Host, report.Config.Remote.Path)
-		if err := git.PushBranch(ctx, report.Workspace.Root, report.Config.Remote.Host, report.Config.Remote.Path, report.Local.Branch); err != nil {
+		if err := git.PushBranch(syncCtx, report.Workspace.Root, report.Config.Remote.Target.RenderSSH(), report.Config.Remote.Path, report.Local.Branch); err != nil {
 			return err
 		}
 		logger.Debug("sync.git_push", map[string]string{"duration": time.Since(started).String()})
 		gitMutated = true
 	case report.Compare.RemoteAhead > 0:
 		started := time.Now()
-		if err := git.CheckRemoteBranchVisible(ctx, devssh.Runner{Target: report.Config.Remote.Target}, report.Config.Remote.Path, report.Local.Branch); err != nil {
+		if err := git.CheckRemoteBranchVisible(syncCtx, devssh.Runner{Target: report.Config.Remote.Target}, report.Config.Remote.Path, report.Local.Branch); err != nil {
 			return err
 		}
 		fmt.Fprintln(out)
 		fmt.Fprintf(out, "Git: pulling %s from %s:%s with --ff-only\n", report.Local.Branch, report.Config.Remote.Host, report.Config.Remote.Path)
-		if err := git.PullBranchFastForward(ctx, report.Workspace.Root, report.Config.Remote.Host, report.Config.Remote.Path, report.Local.Branch); err != nil {
+		if err := git.PullBranchFastForward(syncCtx, report.Workspace.Root, report.Config.Remote.Target.RenderSSH(), report.Config.Remote.Path, report.Local.Branch); err != nil {
 			return err
 		}
 		logger.Debug("sync.git_pull", map[string]string{"duration": time.Since(started).String()})
 		gitMutated = true
 	}
 	if gitMutated {
-		report, err = buildStatus(ctx)
+		report, err = buildStatus(syncCtx)
 		if err != nil {
 			return err
 		}
@@ -308,24 +327,24 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 
 	runner := mutagen.CLIRunner{}
 	started := time.Now()
-	syncState, err := mutagen.EnsureSession(ctx, runner, report.Workspace, report.Config)
+	syncState, err := mutagen.EnsureSession(syncCtx, runner, report.Workspace, report.Config)
 	if err != nil {
 		return err
 	}
 	logger.Debug("sync.ensure_session", map[string]string{"duration": time.Since(started).String(), "session": syncState.SessionName})
 	if syncState.Paused {
 		fmt.Fprintf(out, "Mutagen: resuming session %s\n", syncState.SessionName)
-		if err := mutagen.Resume(ctx, runner, syncState.SessionName); err != nil {
+		if err := mutagen.Resume(syncCtx, runner, syncState.SessionName); err != nil {
 			return err
 		}
 	}
 	fmt.Fprintf(out, "Mutagen: flushing session %s\n", syncState.SessionName)
 	started = time.Now()
-	if err := mutagen.Flush(ctx, runner, syncState.SessionName); err != nil {
+	if err := mutagen.Flush(syncCtx, runner, syncState.SessionName); err != nil {
 		return err
 	}
 	logger.Debug("sync.flush", map[string]string{"duration": time.Since(started).String(), "session": syncState.SessionName})
-	syncState, err = mutagen.InspectWithRunner(ctx, runner, report.Config.Workspace.Name)
+	syncState, err = mutagen.InspectWithRunner(syncCtx, runner, report.Config.Workspace.Name)
 	if err != nil {
 		return err
 	}
@@ -598,7 +617,7 @@ func runDoctor(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(out, "Workspace: ok (%s)\n", report.Workspace.Root)
-	fmt.Fprintf(out, "Config: node=%s host=%s path=%s\n", report.Config.Remote.Node, report.Config.Remote.Host, report.Config.Remote.Path)
+	fmt.Fprintf(out, "Config: node=%s target=%s path=%s\n", report.Config.Remote.Node, report.Config.Remote.Target.RenderSSH(), report.Config.Remote.Path)
 	sshRoundTrip(ctx, out, report.Config.Remote.Target)
 	remoteVersion(ctx, out, report.Config.Remote.Target, "git --version", "Remote Git version")
 	remoteVersion(ctx, out, report.Config.Remote.Target, "df -h "+devssh.QuotePath(report.Config.Remote.Path), "Remote disk")

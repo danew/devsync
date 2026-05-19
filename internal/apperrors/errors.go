@@ -20,6 +20,7 @@ const (
 	ErrWorkspaceLockHeld      Kind = "workspace lock held"
 	ErrSessionDrift           Kind = "session drift"
 	ErrInitialSyncRisk        Kind = "initial sync risk"
+	ErrInterrupted            Kind = "interrupted"
 	ErrDetachedHead           Kind = "detached HEAD"
 )
 

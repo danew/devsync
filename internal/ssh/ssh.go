@@ -53,6 +53,10 @@ func ParseTarget(value string) Target {
 }
 
 func (t Target) String() string {
+	return t.RenderSSH()
+}
+
+func (t Target) RenderSSH() string {
 	if t.Alias != "" {
 		return t.Alias
 	}
@@ -64,6 +68,21 @@ func (t Target) String() string {
 		host += ":" + t.Port
 	}
 	return host
+}
+
+func (t Target) RenderMutagen(path string) string {
+	if t.Port == "" || t.Alias != "" {
+		return t.RenderSSH() + ":" + path
+	}
+	user := ""
+	if t.User != "" {
+		user = t.User + "@"
+	}
+	return "ssh://" + user + t.Host + ":" + t.Port + path
+}
+
+func (t Target) RenderSCP(path string) string {
+	return t.SCPDestination(path)
 }
 
 func (t Target) sshArgs(command string) []string {
@@ -95,6 +114,7 @@ func (t Target) SCPArgs(source string, destination string) []string {
 	if t.Port != "" {
 		args = append(args, "-P", t.Port)
 	}
+	traceSCP(t, source, destination)
 	return append(args, source, t.SCPDestination(destination))
 }
 
@@ -167,6 +187,13 @@ func traceSSH(target Target, command string, phase string, stdout string, stderr
 		fields = append(fields, "stderr="+quoteLog(stderr))
 	}
 	fmt.Fprintln(os.Stderr, strings.Join(fields, " "))
+}
+
+func traceSCP(target Target, source string, destination string) {
+	if os.Getenv("DEVSYNC_TRACE") == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "level=trace event=scp.target.rendered target=%s source=%s destination=%s rendered=%s\n", quoteLog(target.String()), quoteLog(source), quoteLog(destination), quoteLog(target.SCPDestination(destination)))
 }
 
 func quoteLog(value string) string {

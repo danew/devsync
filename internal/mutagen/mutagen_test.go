@@ -4,13 +4,14 @@ import (
 	"reflect"
 	"testing"
 
+	devssh "github.com/danew/devsync/internal/ssh"
 	"github.com/danew/devsync/internal/workspace"
 )
 
 func TestCreateArgsIncludesNameIgnoresAndEndpoints(t *testing.T) {
 	cfg := workspace.Config{
 		Workspace: workspace.WorkspaceIdentity{Name: "steel-api"},
-		Remote:    workspace.RemoteConfig{Host: "core-dev", Path: "~/workspace/work/steel-api"},
+		Remote:    workspace.RemoteConfig{Host: "core-dev", Path: "~/workspace/work/steel-api", Target: devssh.ParseTarget("core-dev")},
 		Sync:      workspace.SyncConfig{Ignores: []string{"node_modules", ".git", "dist"}},
 	}
 
@@ -25,6 +26,24 @@ func TestCreateArgsIncludesNameIgnoresAndEndpoints(t *testing.T) {
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("CreateArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestCreateArgsUsesCanonicalNormalizedTarget(t *testing.T) {
+	cfg := workspace.Config{
+		Workspace: workspace.WorkspaceIdentity{Name: "fly-metadata"},
+		Remote: workspace.RemoteConfig{
+			Host:   "core-dev",
+			Path:   "/home/dev/workspace/work/fly-metadata",
+			Target: devssh.Target{User: "dev", Host: "100.72.16.64"},
+		},
+		Sync: workspace.SyncConfig{Ignores: []string{".git"}},
+	}
+
+	got := CreateArgs("/local/fly-metadata", cfg)
+	wantEndpoint := "dev@100.72.16.64:/home/dev/workspace/work/fly-metadata"
+	if got[len(got)-1] != wantEndpoint {
+		t.Fatalf("endpoint = %q, want %q (args %#v)", got[len(got)-1], wantEndpoint, got)
 	}
 }
 
