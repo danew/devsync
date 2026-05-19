@@ -706,7 +706,7 @@ func buildStatus(ctx context.Context) (status.Report, error) {
 	if err != nil {
 		return status.Report{}, err
 	}
-	comparison := git.CompareHistories(ctx, ws.Root, local.Head, cfg.Remote.Host, cfg.Remote.Path, remote.Head)
+	comparison := git.CompareHistoriesWithRunner(ctx, ws.Root, local.Head, remoteRunner, cfg.Remote.Path, remote.Head)
 	syncState := mutagen.Inspect(ctx, cfg.Workspace.Name)
 	persisted := syncstate.Load(cfg.Workspace.Name)
 	reconciliation := mutagen.Reconcile(ws, cfg, syncState)

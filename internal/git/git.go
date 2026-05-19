@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ type RemoteWorkspaceKind string
 
 const (
 	RemoteMissing        RemoteWorkspaceKind = "missing"
+	RemoteSSHFailure     RemoteWorkspaceKind = "ssh-failure"
 	RemoteEmptyDir       RemoteWorkspaceKind = "empty-directory"
 	RemoteNonGitDir      RemoteWorkspaceKind = "non-git-directory"
 	RemoteValidGitRepo   RemoteWorkspaceKind = "valid-git-repo"
@@ -38,11 +40,13 @@ const (
 )
 
 type RemoteWorkspaceState struct {
-	Kind   RemoteWorkspaceKind
-	Branch string
-	Head   string
-	Dirty  bool
-	Error  error
+	Kind    RemoteWorkspaceKind
+	Branch  string
+	Head    string
+	Dirty   bool
+	Error   error
+	Command string
+	Target  devssh.Target
 }
 
 func InspectLocal(ctx context.Context, root string) (State, error) {
@@ -75,40 +79,62 @@ func InspectRemote(ctx context.Context, runner devssh.Runner, path string) (Stat
 
 func ClassifyRemote(ctx context.Context, runner devssh.Runner, path string, expectedBranch string) RemoteWorkspaceState {
 	remotePath := devssh.QuotePath(path)
-	if _, err := runner.Run(ctx, "test -d "+remotePath); err != nil {
-		return RemoteWorkspaceState{Kind: RemoteMissing}
+	traceRemoteClassification("start", RemoteWorkspaceKind(""), runner, path, "")
+	if result, err := runner.RunRaw(ctx, "test -d "+remotePath); err != nil {
+		state := RemoteWorkspaceState{Kind: RemoteSSHFailure, Error: err, Command: result.Command, Target: result.Target}
+		traceRemoteClassification("ssh-failed", state.Kind, runner, path, state.Command)
+		return state
+	} else if result.ExitCode != 0 {
+		state := RemoteWorkspaceState{Kind: RemoteMissing, Command: result.Command, Target: result.Target}
+		traceRemoteClassification("classified", state.Kind, runner, path, state.Command)
+		return state
 	}
-	firstEntry, err := runner.Run(ctx, "find "+remotePath+" -mindepth 1 -maxdepth 1 | head -n 1")
-	if err == nil && strings.TrimSpace(firstEntry) == "" {
-		return RemoteWorkspaceState{Kind: RemoteEmptyDir}
+	if result, err := runner.RunRaw(ctx, "find "+remotePath+" -mindepth 1 -maxdepth 1 | head -n 1"); err != nil {
+		state := RemoteWorkspaceState{Kind: RemoteNonGitDir, Error: err, Command: result.Command, Target: result.Target}
+		traceRemoteClassification("ssh-failed", state.Kind, runner, path, state.Command)
+		return state
+	} else if result.ExitCode == 0 && strings.TrimSpace(result.Stdout) == "" {
+		state := RemoteWorkspaceState{Kind: RemoteEmptyDir, Command: result.Command, Target: result.Target}
+		traceRemoteClassification("classified", state.Kind, runner, path, state.Command)
+		return state
 	}
-	inside, err := runner.Run(ctx, "cd "+remotePath+" && git rev-parse --is-inside-work-tree")
-	if err != nil || strings.TrimSpace(inside) != "true" {
-		return RemoteWorkspaceState{Kind: RemoteNonGitDir}
+	gitCheck := "git -C " + remotePath + " rev-parse --is-inside-work-tree"
+	if result, err := runner.RunRaw(ctx, gitCheck); err != nil {
+		state := RemoteWorkspaceState{Kind: RemoteNonGitDir, Error: err, Command: result.Command, Target: result.Target}
+		traceRemoteClassification("ssh-failed", state.Kind, runner, path, state.Command)
+		return state
+	} else if result.ExitCode != 0 || strings.TrimSpace(result.Stdout) != "true" {
+		state := RemoteWorkspaceState{Kind: RemoteNonGitDir, Command: result.Command, Target: result.Target}
+		traceRemoteClassification("classified", state.Kind, runner, path, state.Command)
+		return state
 	}
-	branch, err := runner.Run(ctx, "cd "+remotePath+" && git branch --show-current")
+	branch, err := runner.Run(ctx, "git -C "+remotePath+" branch --show-current")
 	if err != nil {
 		return RemoteWorkspaceState{Kind: RemoteNonGitDir, Error: err}
 	}
 	if expectedBranch != "" && branch != expectedBranch {
-		return RemoteWorkspaceState{Kind: RemoteBranchMismatch, Branch: branch}
+		state := RemoteWorkspaceState{Kind: RemoteBranchMismatch, Branch: branch}
+		traceRemoteClassification("classified", state.Kind, runner, path, "git branch --show-current")
+		return state
 	}
-	head, err := runner.Run(ctx, "cd "+remotePath+" && git rev-parse HEAD")
+	head, err := runner.Run(ctx, "git -C "+remotePath+" rev-parse HEAD")
 	if err != nil {
 		return RemoteWorkspaceState{Kind: RemoteNonGitDir, Error: err}
 	}
-	dirty, err := runner.Run(ctx, "cd "+remotePath+" && git status --porcelain")
+	dirty, err := runner.Run(ctx, "git -C "+remotePath+" status --porcelain")
 	if err != nil {
 		return RemoteWorkspaceState{Kind: RemoteNonGitDir, Error: err}
 	}
 	dirtyEntries := splitLines(dirty)
-	return RemoteWorkspaceState{Kind: RemoteValidGitRepo, Branch: branch, Head: head, Dirty: len(dirtyEntries) > 0}
+	state := RemoteWorkspaceState{Kind: RemoteValidGitRepo, Branch: branch, Head: head, Dirty: len(dirtyEntries) > 0}
+	traceRemoteClassification("classified", state.Kind, runner, path, "git status --porcelain")
+	return state
 }
 
 func remoteStateError(kind RemoteWorkspaceKind, path string) error {
 	switch kind {
 	case RemoteMissing:
-		return apperrors.NewWithRemedy(apperrors.ErrRemoteRepoMissing, fmt.Sprintf("remote workspace path does not exist: %s", path), "verify remote.ssh user/host and remote.path, or run devsync init-remote")
+		return apperrors.NewWithRemedy(apperrors.ErrRemoteRepoMissing, fmt.Sprintf("remote workspace path does not exist: %s", path), "verify remote.ssh user/host and remote.path, run the reproduce command from trace output, or run devsync init-remote")
 	case RemoteEmptyDir:
 		return apperrors.NewWithRemedy(apperrors.ErrRemoteRepoMissing, fmt.Sprintf("remote workspace path is empty: %s", path), "run devsync init-remote to seed the repository")
 	default:
@@ -116,15 +142,47 @@ func remoteStateError(kind RemoteWorkspaceKind, path string) error {
 	}
 }
 
+func RemoteReproduceCommand(target devssh.Target, command string) string {
+	return "ssh " + target.String() + " " + devssh.Quote(command)
+}
+
+func traceRemoteClassification(phase string, kind RemoteWorkspaceKind, runner devssh.Runner, path string, command string) {
+	if os.Getenv("DEVSYNC_TRACE") == "" {
+		return
+	}
+	fields := []string{
+		"level=trace",
+		"event=remote.classification",
+		"phase=" + quoteLog(phase),
+		"path=" + quoteLog(path),
+	}
+	if kind != "" {
+		fields = append(fields, "kind="+quoteLog(string(kind)))
+	}
+	if command != "" {
+		fields = append(fields, "command="+quoteLog(command))
+	}
+	fmt.Fprintln(os.Stderr, strings.Join(fields, " "))
+}
+
+func quoteLog(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `"`, `\"`)
+	return `"` + value + `"`
+}
+
 func CompareHistories(ctx context.Context, localRoot, localHead, remoteHost, remotePath, remoteHead string) Comparison {
+	return CompareHistoriesWithRunner(ctx, localRoot, localHead, devssh.Runner{Host: remoteHost}, remotePath, remoteHead)
+}
+
+func CompareHistoriesWithRunner(ctx context.Context, localRoot, localHead string, runner devssh.Runner, remotePath, remoteHead string) Comparison {
 	if localHead == remoteHead {
 		return Comparison{Known: true}
 	}
 	if comparison, err := compareLocal(ctx, localRoot, localHead, remoteHead); err == nil {
 		return comparison
 	}
-	runner := devssh.Runner{Host: remoteHost}
-	command := "cd " + devssh.QuotePath(remotePath) + " && git rev-list --left-right --count " + devssh.Quote(localHead+"..."+remoteHead)
+	command := "git -C " + devssh.QuotePath(remotePath) + " rev-list --left-right --count " + devssh.Quote(localHead+"..."+remoteHead)
 	out, err := runner.Run(ctx, command)
 	if err != nil {
 		return Comparison{Known: false, Err: apperrors.New(apperrors.ErrHistoryUnknown, "unable to compare histories; neither repository can see both HEAD commits")}
