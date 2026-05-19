@@ -531,6 +531,10 @@ func runInitRemote(ctx context.Context, out io.Writer, yes bool) error {
 	if local.Branch == "" {
 		return apperrors.NewWithRemedy(apperrors.ErrDetachedHead, "local repository is in detached HEAD state", "checkout a branch before initializing the remote workspace")
 	}
+	canonicalOrigin, err := git.CaptureOrigin(ctx, ws.Root)
+	if err != nil {
+		return err
+	}
 	runner := devssh.Runner{Target: cfg.Remote.Target}
 	if _, err := runner.Run(ctx, "git --version"); err != nil {
 		return err
@@ -545,10 +549,20 @@ func runInitRemote(ctx context.Context, out io.Writer, yes bool) error {
 	fmt.Fprintln(out, "Preparing remote workspace:")
 	fmt.Fprintf(out, "  local:  %s\n", ws.Root)
 	fmt.Fprintf(out, "  remote: %s:%s\n", cfg.Remote.Target.String(), cfg.Remote.Path)
+	fmt.Fprintln(out, "Canonical Git remotes to preserve:")
+	if canonicalOrigin == nil {
+		fmt.Fprintln(out, "  warning: no origin remote found; remote repository will be left without origin")
+	} else {
+		fmt.Fprintf(out, "  origin -> %s\n", canonicalOrigin.FetchURL)
+		if canonicalOrigin.PushURL != "" && canonicalOrigin.PushURL != canonicalOrigin.FetchURL {
+			fmt.Fprintf(out, "  origin push -> %s\n", canonicalOrigin.PushURL)
+		}
+	}
 	fmt.Fprintln(out, "Operations:")
 	fmt.Fprintln(out, "  - create temporary mirror")
 	fmt.Fprintln(out, "  - upload mirror")
 	fmt.Fprintln(out, "  - create remote working clone")
+	fmt.Fprintln(out, "  - restore canonical Git remotes")
 	fmt.Fprintln(out, "  - validate remote repository")
 	fmt.Fprintln(out, "  - clean temporary artifacts")
 	if !yes {
@@ -582,12 +596,24 @@ func runInitRemote(ctx context.Context, out io.Writer, yes bool) error {
 	if _, err := runner.Run(ctx, "mkdir -p $(dirname "+devssh.QuotePath(cfg.Remote.Path)+") && rm -rf "+devssh.QuotePath(cfg.Remote.Path)+" && git clone "+devssh.QuotePath(remoteMirror)+" "+devssh.QuotePath(cfg.Remote.Path)); err != nil {
 		return err
 	}
+	remoteTopology, err := git.RestoreRemoteOrigin(ctx, runner, cfg.Remote.Path, canonicalOrigin, remoteMirror)
+	if err != nil {
+		return err
+	}
 	remote, err := git.InspectRemote(ctx, runner, cfg.Remote.Path)
 	if err != nil {
 		return err
 	}
 	if remote.Branch != local.Branch || remote.Head != local.Head || remote.Dirty {
 		return apperrors.NewWithRemedy(apperrors.ErrRemoteRepoInvalid, "remote seed validation failed", "inspect the remote repository manually before syncing")
+	}
+	if strings.TrimSpace(remoteTopology) == "" {
+		fmt.Fprintln(out, "Remote Git remotes: none")
+	} else {
+		fmt.Fprintln(out, "Remote Git remotes:")
+		for _, line := range strings.Split(remoteTopology, "\n") {
+			fmt.Fprintf(out, "  %s\n", line)
+		}
 	}
 	fmt.Fprintln(out, "Remote workspace initialized successfully.")
 	fmt.Fprintln(out, "Next steps: devsync doctor; devsync sync --dry-run; devsync sync")

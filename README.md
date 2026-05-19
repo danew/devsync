@@ -69,7 +69,7 @@ See `docs/examples.md` for configuration examples.
 - `devsync bootstrap`: validate first-run setup and create missing global config.
 - `devsync bootstrap --init-workspace`: also write `.devsync.yaml` for the current repository.
 - `devsync init --remote-host <host> --remote-path <path>`: write an explicit workspace override.
-- `devsync init-remote`: explicitly seed the remote Git repository, then stop before synchronization.
+- `devsync init-remote`: explicitly seed the remote Git repository, restore canonical `origin`, then stop before synchronization.
 - `devsync status`: inspect Git, config, Mutagen, and sync freshness.
 - `devsync sync --dry-run`: show the operation plan without mutation.
 - `devsync sync`: validate Git, reconcile session state, flush Mutagen.

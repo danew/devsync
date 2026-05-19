@@ -27,6 +27,12 @@ type Comparison struct {
 	Err         error
 }
 
+type RemoteConfig struct {
+	Name     string
+	FetchURL string
+	PushURL  string
+}
+
 type RemoteWorkspaceKind string
 
 const (
@@ -64,6 +70,61 @@ func InspectLocal(ctx context.Context, root string) (State, error) {
 	}
 	entries := splitLines(dirty)
 	return State{Branch: branch, Head: head, Dirty: len(entries) > 0, DirtyEntries: entries}, nil
+}
+
+func CaptureOrigin(ctx context.Context, root string) (*RemoteConfig, error) {
+	remotes, err := runGit(ctx, root, "remote")
+	if err != nil {
+		return nil, err
+	}
+	if !hasLine(remotes, "origin") {
+		traceRemoteCapture(RemoteConfig{Name: "origin"}, false)
+		return nil, nil
+	}
+	fetchURL, err := runGit(ctx, root, "remote", "get-url", "origin")
+	if err != nil {
+		return nil, err
+	}
+	pushURL, err := runGit(ctx, root, "remote", "get-url", "--push", "origin")
+	if err != nil {
+		return nil, err
+	}
+	remote := RemoteConfig{Name: "origin", FetchURL: fetchURL, PushURL: pushURL}
+	traceRemoteCapture(remote, true)
+	return &remote, nil
+}
+
+func RestoreRemoteOrigin(ctx context.Context, runner devssh.Runner, path string, origin *RemoteConfig, forbiddenReference string) (string, error) {
+	remotePath := devssh.QuotePath(path)
+	if origin == nil {
+		traceRemoteRestore(RemoteConfig{Name: "origin"}, "remove")
+		if _, err := runner.Run(ctx, "git -C "+remotePath+" remote remove origin"); err != nil {
+			return "", fmt.Errorf("remove temporary bootstrap origin: %w", err)
+		}
+		return VerifyRemoteTopology(ctx, runner, path, forbiddenReference)
+	}
+	traceRemoteRestore(*origin, "restore")
+	if _, err := runner.Run(ctx, "git -C "+remotePath+" remote set-url origin "+devssh.Quote(origin.FetchURL)); err != nil {
+		return "", fmt.Errorf("restore canonical origin fetch URL: %w", err)
+	}
+	if origin.PushURL != "" {
+		if _, err := runner.Run(ctx, "git -C "+remotePath+" remote set-url --push origin "+devssh.Quote(origin.PushURL)); err != nil {
+			return "", fmt.Errorf("restore canonical origin push URL: %w", err)
+		}
+	}
+	return VerifyRemoteTopology(ctx, runner, path, forbiddenReference)
+}
+
+func VerifyRemoteTopology(ctx context.Context, runner devssh.Runner, path string, forbiddenReference string) (string, error) {
+	remotePath := devssh.QuotePath(path)
+	remoteList, err := runner.Run(ctx, "git -C "+remotePath+" remote -v")
+	if err != nil {
+		return "", fmt.Errorf("inspect remote Git topology: %w", err)
+	}
+	if forbiddenReference != "" && strings.Contains(remoteList, forbiddenReference) {
+		return remoteList, apperrors.NewWithRemedy(apperrors.ErrRemoteRepoInvalid, "temporary bootstrap mirror remains in remote Git topology", "inspect git remote -v on the remote repository before syncing")
+	}
+	return remoteList, nil
 }
 
 func InspectRemote(ctx context.Context, runner devssh.Runner, path string) (State, error) {
@@ -161,6 +222,44 @@ func traceRemoteClassification(phase string, kind RemoteWorkspaceKind, runner de
 	}
 	if command != "" {
 		fields = append(fields, "command="+quoteLog(command))
+	}
+	fmt.Fprintln(os.Stderr, strings.Join(fields, " "))
+}
+
+func traceRemoteCapture(remote RemoteConfig, found bool) {
+	if os.Getenv("DEVSYNC_TRACE") == "" {
+		return
+	}
+	fields := []string{
+		"level=trace",
+		"event=git.remote.capture",
+		"remote=" + quoteLog(remote.Name),
+		"found=" + strconv.FormatBool(found),
+	}
+	if remote.FetchURL != "" {
+		fields = append(fields, "fetch_url="+quoteLog(remote.FetchURL))
+	}
+	if remote.PushURL != "" {
+		fields = append(fields, "push_url="+quoteLog(remote.PushURL))
+	}
+	fmt.Fprintln(os.Stderr, strings.Join(fields, " "))
+}
+
+func traceRemoteRestore(remote RemoteConfig, action string) {
+	if os.Getenv("DEVSYNC_TRACE") == "" {
+		return
+	}
+	fields := []string{
+		"level=trace",
+		"event=git.remote.restore",
+		"action=" + quoteLog(action),
+		"remote=" + quoteLog(remote.Name),
+	}
+	if remote.FetchURL != "" {
+		fields = append(fields, "fetch_url="+quoteLog(remote.FetchURL))
+	}
+	if remote.PushURL != "" {
+		fields = append(fields, "push_url="+quoteLog(remote.PushURL))
 	}
 	fmt.Fprintln(os.Stderr, strings.Join(fields, " "))
 }
@@ -294,4 +393,13 @@ func splitLines(value string) []string {
 		return nil
 	}
 	return strings.Split(strings.TrimRight(value, "\n"), "\n")
+}
+
+func hasLine(value string, line string) bool {
+	for _, candidate := range splitLines(value) {
+		if candidate == line {
+			return true
+		}
+	}
+	return false
 }
