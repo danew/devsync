@@ -111,6 +111,31 @@ sync:
 	assertContains(t, cfg.Sync.Ignores, ".env.local")
 }
 
+func TestResolveConfigSupportsStructuredSSHOverride(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := filepath.Join(home, "remote", "work", "example")
+	mustMkdir(t, repo)
+	writeFile(t, filepath.Join(repo, LocalOverrideFile), `remote:
+  ssh:
+    user: dev
+    host: 100.72.16.64
+    port: "22"
+  path: /home/dev/workspace/work/example
+`)
+
+	cfg, err := ResolveConfig(Workspace{Name: "example", Root: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Remote.Target.User != "dev" || cfg.Remote.Target.Host != "100.72.16.64" || cfg.Remote.Target.Port != "22" {
+		t.Fatalf("unexpected target: %#v", cfg.Remote.Target)
+	}
+	if cfg.Remote.Host != "dev@100.72.16.64:22" {
+		t.Fatalf("host = %q", cfg.Remote.Host)
+	}
+}
+
 func TestResolveConfigForcesGitIgnore(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

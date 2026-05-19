@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -56,6 +57,7 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(newSyncCommand(options))
 	root.AddCommand(newDoctorCommand())
 	root.AddCommand(newBootstrapCommand())
+	root.AddCommand(newInitRemoteCommand())
 	root.AddCommand(newVersionCommand())
 	root.AddCommand(newSessionCommand())
 	root.AddCommand(newInitCommand())
@@ -128,6 +130,19 @@ func newBootstrapCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&initWorkspace, "init-workspace", false, "write .devsync.yaml for the current repository using resolved conventions")
+	return cmd
+}
+
+func newInitRemoteCommand() *cobra.Command {
+	var yes bool
+	cmd := &cobra.Command{
+		Use:   "init-remote",
+		Short: "Explicitly seed the remote workspace repository and stop before synchronization",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runInitRemote(cmd.Context(), os.Stdout, yes)
+		},
+	}
+	cmd.Flags().BoolVar(&yes, "yes", false, "confirm remote initialization without prompting")
 	return cmd
 }
 
@@ -255,7 +270,7 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 	switch {
 	case report.Compare.LocalAhead > 0:
 		started := time.Now()
-		if err := git.CheckRemoteBranchVisible(ctx, devssh.Runner{Host: report.Config.Remote.Host}, report.Config.Remote.Path, report.Local.Branch); err != nil {
+		if err := git.CheckRemoteBranchVisible(ctx, devssh.Runner{Target: report.Config.Remote.Target}, report.Config.Remote.Path, report.Local.Branch); err != nil {
 			return err
 		}
 		fmt.Fprintln(out)
@@ -267,7 +282,7 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 		gitMutated = true
 	case report.Compare.RemoteAhead > 0:
 		started := time.Now()
-		if err := git.CheckRemoteBranchVisible(ctx, devssh.Runner{Host: report.Config.Remote.Host}, report.Config.Remote.Path, report.Local.Branch); err != nil {
+		if err := git.CheckRemoteBranchVisible(ctx, devssh.Runner{Target: report.Config.Remote.Target}, report.Config.Remote.Path, report.Local.Branch); err != nil {
 			return err
 		}
 		fmt.Fprintln(out)
@@ -479,6 +494,96 @@ func runBootstrap(ctx context.Context, out io.Writer, initWorkspace bool) error 
 	return nil
 }
 
+func runInitRemote(ctx context.Context, out io.Writer, yes bool) error {
+	ws, err := workspace.Discover(ctx)
+	if err != nil {
+		return err
+	}
+	cfg, err := workspace.ResolveConfig(ws)
+	if err != nil {
+		return err
+	}
+	local, err := git.InspectLocal(ctx, ws.Root)
+	if err != nil {
+		return err
+	}
+	if local.Branch == "" {
+		return apperrors.NewWithRemedy(apperrors.ErrDetachedHead, "local repository is in detached HEAD state", "checkout a branch before initializing the remote workspace")
+	}
+	runner := devssh.Runner{Target: cfg.Remote.Target}
+	if _, err := runner.Run(ctx, "git --version"); err != nil {
+		return err
+	}
+	remoteState := git.ClassifyRemote(ctx, runner, cfg.Remote.Path, "")
+	if remoteState.Kind == git.RemoteValidGitRepo {
+		return apperrors.NewWithRemedy(apperrors.ErrRemoteRepoInvalid, "remote workspace is already a Git repository", "run devsync doctor/status; init-remote only seeds missing workspaces")
+	}
+	if remoteState.Kind != git.RemoteMissing && remoteState.Kind != git.RemoteEmptyDir {
+		return apperrors.NewWithRemedy(apperrors.ErrRemoteRepoInvalid, fmt.Sprintf("remote workspace is %s", remoteState.Kind), "move or clean the remote path before running init-remote")
+	}
+	fmt.Fprintln(out, "Preparing remote workspace:")
+	fmt.Fprintf(out, "  local:  %s\n", ws.Root)
+	fmt.Fprintf(out, "  remote: %s:%s\n", cfg.Remote.Target.String(), cfg.Remote.Path)
+	fmt.Fprintln(out, "Operations:")
+	fmt.Fprintln(out, "  - create temporary mirror")
+	fmt.Fprintln(out, "  - upload mirror")
+	fmt.Fprintln(out, "  - create remote working clone")
+	fmt.Fprintln(out, "  - validate remote repository")
+	fmt.Fprintln(out, "  - clean temporary artifacts")
+	if !yes {
+		if !isInteractive() {
+			return apperrors.NewWithRemedy(apperrors.ErrInitialSyncRisk, "remote initialization requires explicit confirmation", "rerun with devsync init-remote --yes after reviewing the planned operations")
+		}
+		fmt.Fprint(out, "Proceed? [y/N] ")
+		answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		answer = strings.ToLower(strings.TrimSpace(answer))
+		if answer != "y" && answer != "yes" {
+			return apperrors.New(apperrors.ErrInitialSyncRisk, "remote initialization declined")
+		}
+	}
+	tmpDir, err := os.MkdirTemp("", "devsync-mirror-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	localMirror := filepath.Join(tmpDir, "repo.mirror.git")
+	if err := runCommand(ctx, ws.Root, "git", "clone", "--mirror", ".", localMirror); err != nil {
+		return err
+	}
+	remoteMirror := "~/tmp/devsync-" + cfg.Workspace.Name + ".mirror.git"
+	defer runner.Run(ctx, "rm -rf "+devssh.QuotePath(remoteMirror))
+	if _, err := runner.Run(ctx, "mkdir -p ~/tmp && rm -rf "+devssh.QuotePath(remoteMirror)); err != nil {
+		return err
+	}
+	if err := runCommand(ctx, "", "scp", cfg.Remote.Target.SCPArgs(localMirror, "~/tmp/devsync-"+cfg.Workspace.Name+".mirror.git")...); err != nil {
+		return err
+	}
+	if _, err := runner.Run(ctx, "mkdir -p $(dirname "+devssh.QuotePath(cfg.Remote.Path)+") && rm -rf "+devssh.QuotePath(cfg.Remote.Path)+" && git clone "+devssh.QuotePath(remoteMirror)+" "+devssh.QuotePath(cfg.Remote.Path)); err != nil {
+		return err
+	}
+	remote, err := git.InspectRemote(ctx, runner, cfg.Remote.Path)
+	if err != nil {
+		return err
+	}
+	if remote.Branch != local.Branch || remote.Head != local.Head || remote.Dirty {
+		return apperrors.NewWithRemedy(apperrors.ErrRemoteRepoInvalid, "remote seed validation failed", "inspect the remote repository manually before syncing")
+	}
+	fmt.Fprintln(out, "Remote workspace initialized successfully.")
+	fmt.Fprintln(out, "Next steps: devsync doctor; devsync sync --dry-run; devsync sync")
+	return nil
+}
+
+func runCommand(ctx context.Context, dir string, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
 func runDoctor(ctx context.Context, out io.Writer) error {
 	fmt.Fprintln(out, "DevSync doctor")
 	tool(out, "git", "Git CLI")
@@ -494,9 +599,9 @@ func runDoctor(ctx context.Context, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "Workspace: ok (%s)\n", report.Workspace.Root)
 	fmt.Fprintf(out, "Config: node=%s host=%s path=%s\n", report.Config.Remote.Node, report.Config.Remote.Host, report.Config.Remote.Path)
-	sshRoundTrip(ctx, out, report.Config.Remote.Host)
-	remoteVersion(ctx, out, report.Config.Remote.Host, "git --version", "Remote Git version")
-	remoteVersion(ctx, out, report.Config.Remote.Host, "df -h "+devssh.QuotePath(report.Config.Remote.Path), "Remote disk")
+	sshRoundTrip(ctx, out, report.Config.Remote.Target)
+	remoteVersion(ctx, out, report.Config.Remote.Target, "git --version", "Remote Git version")
+	remoteVersion(ctx, out, report.Config.Remote.Target, "df -h "+devssh.QuotePath(report.Config.Remote.Path), "Remote disk")
 	lockInspection(out, report.Config.Workspace.Name)
 	fmt.Fprintf(out, "Remote repo: ok (%s)\n", report.Remote.Branch)
 	fmt.Fprintf(out, "History: local ahead=%d remote ahead=%d known=%v\n", report.Compare.LocalAhead, report.Compare.RemoteAhead, report.Compare.Known)
@@ -542,9 +647,9 @@ func disk(out io.Writer, path string, label string) {
 	fmt.Fprintf(out, "%s:\n%s\n", label, strings.TrimSpace(string(output)))
 }
 
-func sshRoundTrip(ctx context.Context, out io.Writer, host string) {
+func sshRoundTrip(ctx context.Context, out io.Writer, target devssh.Target) {
 	start := time.Now()
-	_, err := devssh.Runner{Host: host}.Run(ctx, "true")
+	_, err := devssh.Runner{Target: target}.Run(ctx, "true")
 	if err != nil {
 		fmt.Fprintf(out, "SSH round trip: failed (%v)\n", err)
 		return
@@ -552,8 +657,8 @@ func sshRoundTrip(ctx context.Context, out io.Writer, host string) {
 	fmt.Fprintf(out, "SSH round trip: %s\n", time.Since(start).Round(time.Millisecond))
 }
 
-func remoteVersion(ctx context.Context, out io.Writer, host string, command string, label string) {
-	output, err := devssh.Runner{Host: host}.Run(ctx, command)
+func remoteVersion(ctx context.Context, out io.Writer, target devssh.Target, command string, label string) {
+	output, err := devssh.Runner{Target: target}.Run(ctx, command)
 	if err != nil {
 		fmt.Fprintf(out, "%s: unavailable (%v)\n", label, err)
 		return
@@ -596,7 +701,7 @@ func buildStatus(ctx context.Context) (status.Report, error) {
 	if err != nil {
 		return status.Report{}, err
 	}
-	remoteRunner := devssh.Runner{Host: cfg.Remote.Host}
+	remoteRunner := devssh.Runner{Target: cfg.Remote.Target}
 	remote, err := git.InspectRemote(ctx, remoteRunner, cfg.Remote.Path)
 	if err != nil {
 		return status.Report{}, err

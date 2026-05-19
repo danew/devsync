@@ -27,6 +27,7 @@ make build
 ./bin/devsync version
 ./bin/devsync bootstrap
 ./bin/devsync bootstrap --init-workspace
+./bin/devsync init-remote
 ./bin/devsync doctor
 ./bin/devsync sync --dry-run
 ./bin/devsync sync

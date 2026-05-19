@@ -17,7 +17,7 @@ import (
 
 func TestRootCommandRegistersDoctorAndDryRun(t *testing.T) {
 	root := newRootCommand()
-	for _, command := range []string{"doctor", "bootstrap", "version", "session"} {
+	for _, command := range []string{"doctor", "bootstrap", "version", "session", "init-remote"} {
 		if _, _, err := root.Find([]string{command}); err != nil {
 			t.Fatalf("%s command missing: %v", command, err)
 		}

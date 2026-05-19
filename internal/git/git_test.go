@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/danew/devsync/internal/apperrors"
 )
 
 func TestCompareLocalDetectsAheadBehindAndDivergence(t *testing.T) {
@@ -43,6 +45,17 @@ func TestGitRemoteURLKeepsConfiguredPathInspectable(t *testing.T) {
 	want := "core-dev:~/workspace/work/steel-api"
 	if got != want {
 		t.Fatalf("GitRemoteURL() = %q, want %q", got, want)
+	}
+}
+
+func TestRemoteStateErrorDistinguishesMissingAndEmpty(t *testing.T) {
+	missing := remoteStateError(RemoteMissing, "/missing")
+	if !apperrors.Is(missing, apperrors.ErrRemoteRepoMissing) {
+		t.Fatalf("expected missing error, got %v", missing)
+	}
+	empty := remoteStateError(RemoteEmptyDir, "/empty")
+	if !apperrors.Is(empty, apperrors.ErrRemoteRepoMissing) {
+		t.Fatalf("expected empty dir missing-class error, got %v", empty)
 	}
 }
 

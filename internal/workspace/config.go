@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/danew/devsync/internal/apperrors"
+	devssh "github.com/danew/devsync/internal/ssh"
 	"gopkg.in/yaml.v3"
 )
 
@@ -32,9 +33,17 @@ type WorkspaceIdentity struct {
 }
 
 type RemoteConfig struct {
-	Node string
-	Host string
-	Path string
+	Node   string
+	Host   string
+	SSH    SSHConfig
+	Path   string
+	Target devssh.Target
+}
+
+type SSHConfig struct {
+	User string `yaml:"user"`
+	Host string `yaml:"host"`
+	Port string `yaml:"port"`
 }
 
 type SyncConfig struct {
@@ -98,9 +107,10 @@ type LocalConfig struct {
 }
 
 type LocalRemoteConfig struct {
-	Node string `yaml:"node"`
-	Host string `yaml:"host"`
-	Path string `yaml:"path"`
+	Node string    `yaml:"node"`
+	Host string    `yaml:"host"`
+	SSH  SSHConfig `yaml:"ssh"`
+	Path string    `yaml:"path"`
 }
 
 type LocalSyncConfig struct {
@@ -175,6 +185,11 @@ func ResolveConfigFromLayers(ws Workspace, global GlobalConfig, local LocalConfi
 			cfg.Remote.Host = local.Remote.Host
 			cfg.Sources.RemoteNodeSource = "workspace override"
 		}
+		if local.Remote.SSH.Host != "" {
+			cfg.Remote.SSH = local.Remote.SSH
+			cfg.Remote.Host = formatSSHTarget(local.Remote.SSH)
+			cfg.Sources.RemoteNodeSource = "workspace override"
+		}
 		if node, ok := global.Nodes[cfg.Remote.Node]; ok {
 			if node.SSH != "" && local.Remote.Host == "" {
 				cfg.Remote.Host = node.SSH
@@ -213,6 +228,7 @@ func ResolveConfigFromLayers(ws Workspace, global GlobalConfig, local LocalConfi
 		cfg.Sources.IgnoreSource = "internal defaults + global config + workspace override"
 	}
 	cfg.Sync.Ignores = normalizeIgnores(ignores)
+	cfg.Remote.Target = normalizeRemoteTarget(cfg.Remote.Host, cfg.Remote.SSH)
 
 	if cfg.Workspace.Name == "" {
 		return Config{}, fmt.Errorf("workspace identity could not be resolved")
@@ -221,6 +237,17 @@ func ResolveConfigFromLayers(ws Workspace, global GlobalConfig, local LocalConfi
 		return Config{}, fmt.Errorf("remote configuration could not be resolved safely")
 	}
 	return cfg, nil
+}
+
+func normalizeRemoteTarget(host string, ssh SSHConfig) devssh.Target {
+	if ssh.Host != "" {
+		return devssh.Target{User: ssh.User, Host: ssh.Host, Port: ssh.Port}
+	}
+	return devssh.ParseTarget(host)
+}
+
+func formatSSHTarget(ssh SSHConfig) string {
+	return normalizeRemoteTarget("", ssh).String()
 }
 
 func LoadGlobalConfig() (GlobalConfig, ConfigSources, error) {
@@ -307,7 +334,7 @@ func WriteConfig(cfg Config) (string, error) {
 	}
 	data, err := yaml.Marshal(LocalConfig{
 		Workspace: cfg.Workspace.Name,
-		Remote:    LocalRemoteConfig{Node: cfg.Remote.Node, Host: cfg.Remote.Host, Path: cfg.Remote.Path},
+		Remote:    LocalRemoteConfig{Node: cfg.Remote.Node, Host: cfg.Remote.Host, SSH: cfg.Remote.SSH, Path: cfg.Remote.Path},
 		Sync:      LocalSyncConfig{Mode: cfg.Sync.Mode, Ignores: cfg.Sync.Ignores},
 	})
 	if err != nil {
@@ -323,7 +350,7 @@ func WriteLocalOverride(repoRoot string, cfg Config) (string, error) {
 	path := filepath.Join(repoRoot, LocalOverrideFile)
 	data, err := yaml.Marshal(LocalConfig{
 		Workspace: cfg.Workspace.Name,
-		Remote:    LocalRemoteConfig{Node: cfg.Remote.Node, Host: cfg.Remote.Host, Path: cfg.Remote.Path},
+		Remote:    LocalRemoteConfig{Node: cfg.Remote.Node, Host: cfg.Remote.Host, SSH: cfg.Remote.SSH, Path: cfg.Remote.Path},
 		Sync:      LocalSyncConfig{Mode: cfg.Sync.Mode, Ignores: cfg.Sync.Ignores},
 	})
 	if err != nil {

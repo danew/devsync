@@ -95,3 +95,23 @@ DevSync will not choose winners or overwrite files for you.
 ## Missing Remote Repo
 
 Clone or create the repository remotely, or update `.devsync.yaml` with the correct `remote.path`.
+
+For the common happy path, use explicit remote initialization:
+
+```bash
+devsync init-remote
+devsync doctor
+devsync sync --dry-run
+```
+
+If a path that works manually appears missing in DevSync, check SSH identity normalization. Prefer structured SSH config:
+
+```yaml
+remote:
+  ssh:
+    user: dev
+    host: 100.72.16.64
+  path: /home/dev/workspace/work/example
+```
+
+This avoids ambiguity around remote home directory expansion and SSH users.

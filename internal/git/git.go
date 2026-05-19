@@ -26,6 +26,25 @@ type Comparison struct {
 	Err         error
 }
 
+type RemoteWorkspaceKind string
+
+const (
+	RemoteMissing        RemoteWorkspaceKind = "missing"
+	RemoteEmptyDir       RemoteWorkspaceKind = "empty-directory"
+	RemoteNonGitDir      RemoteWorkspaceKind = "non-git-directory"
+	RemoteValidGitRepo   RemoteWorkspaceKind = "valid-git-repo"
+	RemoteBranchMismatch RemoteWorkspaceKind = "branch-mismatch"
+	RemoteDiverged       RemoteWorkspaceKind = "diverged"
+)
+
+type RemoteWorkspaceState struct {
+	Kind   RemoteWorkspaceKind
+	Branch string
+	Head   string
+	Dirty  bool
+	Error  error
+}
+
 func InspectLocal(ctx context.Context, root string) (State, error) {
 	branch, err := runGit(ctx, root, "branch", "--show-current")
 	if err != nil {
@@ -44,28 +63,57 @@ func InspectLocal(ctx context.Context, root string) (State, error) {
 }
 
 func InspectRemote(ctx context.Context, runner devssh.Runner, path string) (State, error) {
+	classification := ClassifyRemote(ctx, runner, path, "")
+	if classification.Error != nil {
+		return State{}, classification.Error
+	}
+	if classification.Kind != RemoteValidGitRepo {
+		return State{}, remoteStateError(classification.Kind, path)
+	}
+	return State{Branch: classification.Branch, Head: classification.Head, Dirty: classification.Dirty}, nil
+}
+
+func ClassifyRemote(ctx context.Context, runner devssh.Runner, path string, expectedBranch string) RemoteWorkspaceState {
 	remotePath := devssh.QuotePath(path)
 	if _, err := runner.Run(ctx, "test -d "+remotePath); err != nil {
-		return State{}, apperrors.NewWithRemedy(apperrors.ErrRemoteRepoMissing, fmt.Sprintf("remote workspace path does not exist: %s", path), "create or clone the repository on the remote host, or update .devsync.yaml remote.path")
+		return RemoteWorkspaceState{Kind: RemoteMissing}
+	}
+	firstEntry, err := runner.Run(ctx, "find "+remotePath+" -mindepth 1 -maxdepth 1 | head -n 1")
+	if err == nil && strings.TrimSpace(firstEntry) == "" {
+		return RemoteWorkspaceState{Kind: RemoteEmptyDir}
 	}
 	inside, err := runner.Run(ctx, "cd "+remotePath+" && git rev-parse --is-inside-work-tree")
 	if err != nil || strings.TrimSpace(inside) != "true" {
-		return State{}, apperrors.NewWithRemedy(apperrors.ErrRemoteRepoInvalid, fmt.Sprintf("remote path is not a Git work tree: %s", path), "verify the remote path points at an initialized repository")
+		return RemoteWorkspaceState{Kind: RemoteNonGitDir}
 	}
 	branch, err := runner.Run(ctx, "cd "+remotePath+" && git branch --show-current")
 	if err != nil {
-		return State{}, err
+		return RemoteWorkspaceState{Kind: RemoteNonGitDir, Error: err}
+	}
+	if expectedBranch != "" && branch != expectedBranch {
+		return RemoteWorkspaceState{Kind: RemoteBranchMismatch, Branch: branch}
 	}
 	head, err := runner.Run(ctx, "cd "+remotePath+" && git rev-parse HEAD")
 	if err != nil {
-		return State{}, err
+		return RemoteWorkspaceState{Kind: RemoteNonGitDir, Error: err}
 	}
 	dirty, err := runner.Run(ctx, "cd "+remotePath+" && git status --porcelain")
 	if err != nil {
-		return State{}, err
+		return RemoteWorkspaceState{Kind: RemoteNonGitDir, Error: err}
 	}
-	entries := splitLines(dirty)
-	return State{Branch: branch, Head: head, Dirty: len(entries) > 0, DirtyEntries: entries}, nil
+	dirtyEntries := splitLines(dirty)
+	return RemoteWorkspaceState{Kind: RemoteValidGitRepo, Branch: branch, Head: head, Dirty: len(dirtyEntries) > 0}
+}
+
+func remoteStateError(kind RemoteWorkspaceKind, path string) error {
+	switch kind {
+	case RemoteMissing:
+		return apperrors.NewWithRemedy(apperrors.ErrRemoteRepoMissing, fmt.Sprintf("remote workspace path does not exist: %s", path), "verify remote.ssh user/host and remote.path, or run devsync init-remote")
+	case RemoteEmptyDir:
+		return apperrors.NewWithRemedy(apperrors.ErrRemoteRepoMissing, fmt.Sprintf("remote workspace path is empty: %s", path), "run devsync init-remote to seed the repository")
+	default:
+		return apperrors.NewWithRemedy(apperrors.ErrRemoteRepoInvalid, fmt.Sprintf("remote path is not a Git work tree: %s", path), "verify the remote path points at an initialized repository or run devsync init-remote")
+	}
 }
 
 func CompareHistories(ctx context.Context, localRoot, localHead, remoteHost, remotePath, remoteHead string) Comparison {

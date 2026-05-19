@@ -22,8 +22,11 @@ mapping:
 ```yaml
 workspace: steel-api
 remote:
-  node: core-dev
-  path: ~/workspace/work/custom-location
+  ssh:
+    user: dev
+    host: 100.72.16.64
+    port: "22"
+  path: /home/dev/workspace/work/custom-location
 sync:
   ignores:
     - .env.local
@@ -41,6 +44,7 @@ Recommended golden path:
 
 ```bash
 devsync bootstrap --init-workspace
+devsync init-remote
 devsync doctor
 devsync sync --dry-run
 devsync sync
