@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/danew/devsync/internal/apperrors"
 	"github.com/danew/devsync/internal/workspace"
@@ -13,14 +14,35 @@ import (
 
 type State struct {
 	SessionName   string
+	Status        Status
 	Available     bool
 	Exists        bool
 	Active        bool
 	Paused        bool
 	Healthy       bool
+	Alpha         string
+	Beta          string
+	Ignores       []string
 	Problems      []string
 	LastDirection string
+	LastFlushAt   time.Time
 	Message       string
+}
+
+type Status string
+
+const (
+	StatusRunning Status = "running"
+	StatusPaused  Status = "paused"
+	StatusStopped Status = "stopped"
+	StatusProblem Status = "problem"
+	StatusUnknown Status = "unknown"
+)
+
+type Reconciliation struct {
+	Needed  bool
+	Reasons []string
+	Remedy  string
 }
 
 type Runner interface {
@@ -88,6 +110,10 @@ func EnsureSession(ctx context.Context, runner Runner, ws workspace.Workspace, c
 			return state, apperrors.New(apperrors.ErrMutagenUnhealthy, "mutagen session creation did not produce an inspectable session")
 		}
 	}
+	reconciliation := Reconcile(ws, cfg, state)
+	if reconciliation.Needed {
+		return state, apperrors.NewWithRemedy(apperrors.ErrSessionDrift, "mutagen session configuration drift detected: "+strings.Join(reconciliation.Reasons, "; "), reconciliation.Remedy)
+	}
 	return state, nil
 }
 
@@ -107,6 +133,18 @@ func Flush(ctx context.Context, runner Runner, sessionName string) error {
 	return nil
 }
 
+func Terminate(ctx context.Context, runner Runner, sessionName string) error {
+	_, err := runner.Run(ctx, "sync", "terminate", sessionName)
+	if err != nil {
+		return fmt.Errorf("terminate mutagen session %s: %w", sessionName, err)
+	}
+	return nil
+}
+
+func List(ctx context.Context, runner Runner) (string, error) {
+	return runner.Run(ctx, "sync", "list")
+}
+
 func CreateArgs(localRoot string, cfg workspace.Config) []string {
 	args := []string{"sync", "create", "--name", SessionName(cfg.Workspace.Name)}
 	for _, ignore := range normalizedIgnores(cfg.Sync.Ignores) {
@@ -118,18 +156,46 @@ func CreateArgs(localRoot string, cfg workspace.Config) []string {
 
 func ParseListOutput(sessionName string, output string) State {
 	lower := strings.ToLower(output)
-	state := State{SessionName: sessionName, Available: true, Exists: strings.TrimSpace(output) != ""}
+	state := State{SessionName: sessionName, Available: true, Exists: strings.TrimSpace(output) != "", Status: StatusUnknown}
 	if !state.Exists {
+		state.Status = StatusStopped
 		state.Message = "no session found"
 		return state
 	}
-	state.Paused = strings.Contains(lower, "paused")
-	state.Active = !state.Paused
+	state.Alpha = fieldValue(output, "Alpha")
+	state.Beta = fieldValue(output, "Beta")
+	state.Ignores = parseIgnores(output)
 	state.Healthy = !strings.Contains(lower, "problem") && !strings.Contains(lower, "conflict") && !strings.Contains(lower, "error")
+	state.Paused = strings.Contains(lower, "paused")
+	state.Status = normalizeStatus(lower, state.Healthy, state.Paused)
+	state.Active = state.Status == StatusRunning
 	state.Problems = problemLines(output)
 	state.LastDirection = directionFromOutput(lower)
 	state.Message = fmt.Sprintf("session %s detected", sessionName)
 	return state
+}
+
+func Reconcile(ws workspace.Workspace, cfg workspace.Config, state State) Reconciliation {
+	if !state.Exists {
+		return Reconciliation{}
+	}
+	var reasons []string
+	if state.Alpha != "" && state.Alpha != ws.Root {
+		reasons = append(reasons, fmt.Sprintf("local endpoint is %s, expected %s", state.Alpha, ws.Root))
+	}
+	expectedBeta := cfg.Remote.Host + ":" + cfg.Remote.Path
+	if state.Beta != "" && state.Beta != expectedBeta {
+		reasons = append(reasons, fmt.Sprintf("remote endpoint is %s, expected %s", state.Beta, expectedBeta))
+	}
+	for _, ignore := range normalizedIgnores(cfg.Sync.Ignores) {
+		if len(state.Ignores) > 0 && !contains(state.Ignores, ignore) {
+			reasons = append(reasons, fmt.Sprintf("missing ignore rule %s", ignore))
+		}
+	}
+	if len(reasons) == 0 {
+		return Reconciliation{}
+	}
+	return Reconciliation{Needed: true, Reasons: reasons, Remedy: "inspect with mutagen sync list; terminate and recreate the session only after confirming the endpoints and ignores are safe"}
 }
 
 func normalizedIgnores(ignores []string) []string {
@@ -167,6 +233,61 @@ func directionFromOutput(output string) string {
 	default:
 		return "unknown"
 	}
+}
+
+func normalizeStatus(output string, healthy bool, paused bool) Status {
+	switch {
+	case !healthy:
+		return StatusProblem
+	case paused:
+		return StatusPaused
+	case strings.Contains(output, "stopped"):
+		return StatusStopped
+	case strings.Contains(output, "watch") && strings.Contains(output, "fail"):
+		return StatusProblem
+	case strings.Contains(output, "connecting") || strings.Contains(output, "transport"):
+		return StatusUnknown
+	default:
+		return StatusRunning
+	}
+}
+
+func fieldValue(output string, field string) string {
+	prefix := strings.ToLower(field) + ":"
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(trimmed), prefix) {
+			return strings.TrimSpace(trimmed[len(field)+1:])
+		}
+	}
+	return ""
+}
+
+func parseIgnores(output string) []string {
+	var ignores []string
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "ignore:") || strings.HasPrefix(lower, "ignores:") {
+			parts := strings.Split(strings.TrimSpace(trimmed[strings.Index(trimmed, ":")+1:]), ",")
+			for _, part := range parts {
+				part = strings.TrimSpace(strings.TrimPrefix(part, "-"))
+				if part != "" {
+					ignores = append(ignores, part)
+				}
+			}
+		}
+	}
+	return ignores
+}
+
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func sessionBlock(sessionName, output string) string {

@@ -48,3 +48,38 @@ Problems:
 		t.Fatal("expected problem lines")
 	}
 }
+
+func TestParseListOutputNormalizesEndpointsAndIgnores(t *testing.T) {
+	state := ParseListOutput("devsync-steel-api", `Name: devsync-steel-api
+Status: Watching for changes
+Alpha: /local/steel-api
+Beta: core-dev:~/workspace/work/steel-api
+Ignores: .git, node_modules, dist`)
+
+	if state.Status != StatusRunning {
+		t.Fatalf("status = %s", state.Status)
+	}
+	if state.Alpha != "/local/steel-api" || state.Beta != "core-dev:~/workspace/work/steel-api" {
+		t.Fatalf("endpoints = %q/%q", state.Alpha, state.Beta)
+	}
+	if !state.Healthy {
+		t.Fatal("expected healthy state")
+	}
+}
+
+func TestReconcileDetectsEndpointAndIgnoreDrift(t *testing.T) {
+	cfg := workspace.Config{
+		Workspace: workspace.WorkspaceIdentity{Name: "steel-api"},
+		Remote:    workspace.RemoteConfig{Host: "core-dev", Path: "~/workspace/work/steel-api"},
+		Sync:      workspace.SyncConfig{Ignores: []string{".git", "node_modules", "dist"}},
+	}
+	state := State{Exists: true, Alpha: "/wrong", Beta: "core-dev:~/workspace/work/steel-api", Ignores: []string{".git"}}
+
+	reconciliation := Reconcile(workspace.Workspace{Root: "/local/steel-api"}, cfg, state)
+	if !reconciliation.Needed {
+		t.Fatal("expected reconciliation to be needed")
+	}
+	if len(reconciliation.Reasons) < 2 {
+		t.Fatalf("expected endpoint and ignore drift reasons, got %#v", reconciliation.Reasons)
+	}
+}

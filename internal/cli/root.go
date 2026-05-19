@@ -1,20 +1,35 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/danew/devsync/internal/apperrors"
+	"github.com/danew/devsync/internal/buildinfo"
 	"github.com/danew/devsync/internal/git"
+	"github.com/danew/devsync/internal/lock"
+	"github.com/danew/devsync/internal/logging"
 	"github.com/danew/devsync/internal/mutagen"
+	"github.com/danew/devsync/internal/plan"
 	devssh "github.com/danew/devsync/internal/ssh"
 	"github.com/danew/devsync/internal/status"
+	"github.com/danew/devsync/internal/syncstate"
 	"github.com/danew/devsync/internal/ui"
 	"github.com/danew/devsync/internal/workspace"
 )
+
+type cliOptions struct {
+	debug bool
+	trace bool
+}
 
 func Execute() error {
 	root := newRootCommand()
@@ -22,18 +37,26 @@ func Execute() error {
 }
 
 func newRootCommand() *cobra.Command {
+	options := &cliOptions{}
 	root := &cobra.Command{
 		Use:           "devsync",
 		Short:         "Git-aware workspace synchronization for remote-first development",
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSync(cmd.Context(), os.Stdout)
+			logger := logging.New(options.debug, options.trace, os.Stderr)
+			return runSync(cmd.Context(), os.Stdout, false, logger)
 		},
 	}
+	root.PersistentFlags().BoolVar(&options.debug, "debug", false, "enable structured debug logging")
+	root.PersistentFlags().BoolVar(&options.trace, "trace", false, "enable verbose trace logging")
 
 	root.AddCommand(newStatusCommand())
-	root.AddCommand(newSyncCommand())
+	root.AddCommand(newSyncCommand(options))
+	root.AddCommand(newDoctorCommand())
+	root.AddCommand(newBootstrapCommand())
+	root.AddCommand(newVersionCommand())
+	root.AddCommand(newSessionCommand())
 	root.AddCommand(newInitCommand())
 	root.AddCommand(&cobra.Command{
 		Use:   "attach",
@@ -68,12 +91,102 @@ func newStatusCommand() *cobra.Command {
 	}
 }
 
-func newSyncCommand() *cobra.Command {
-	return &cobra.Command{
+func newSyncCommand(options *cliOptions) *cobra.Command {
+	var dryRun bool
+	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Validate Git state and prepare safe workspace synchronization",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSync(cmd.Context(), os.Stdout)
+			logger := logging.New(options.debug, options.trace, os.Stderr)
+			return runSync(cmd.Context(), os.Stdout, dryRun, logger)
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show planned operations without mutating Git or Mutagen state")
+	return cmd
+}
+
+func newVersionCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print build and runtime version information",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			info := buildinfo.Current()
+			fmt.Fprintf(os.Stdout, "devsync %s\ncommit: %s\nbuilt: %s\ngo: %s\nplatform: %s/%s\n", info.Version, info.Commit, info.Date, info.GoVersion, info.OS, info.Arch)
+			return nil
+		},
+	}
+}
+
+func newBootstrapCommand() *cobra.Command {
+	var initWorkspace bool
+	cmd := &cobra.Command{
+		Use:   "bootstrap",
+		Short: "Validate first-run setup and generate missing local configuration",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runBootstrap(cmd.Context(), os.Stdout, initWorkspace)
+		},
+	}
+	cmd.Flags().BoolVar(&initWorkspace, "init-workspace", false, "write .devsync.yaml for the current repository using resolved conventions")
+	return cmd
+}
+
+func newSessionCommand() *cobra.Command {
+	session := &cobra.Command{Use: "session", Short: "Inspect and manage the Mutagen session for this workspace"}
+	session.AddCommand(&cobra.Command{Use: "ls", Short: "List Mutagen sync sessions", RunE: func(cmd *cobra.Command, args []string) error {
+		out, err := mutagen.List(cmd.Context(), mutagen.CLIRunner{})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stdout, out)
+		return nil
+	}})
+	session.AddCommand(&cobra.Command{Use: "inspect", Short: "Inspect the resolved workspace session", RunE: func(cmd *cobra.Command, args []string) error {
+		report, err := buildStatus(cmd.Context())
+		if err != nil {
+			return err
+		}
+		ui.WriteStatus(os.Stdout, report)
+		return nil
+	}})
+	session.AddCommand(&cobra.Command{Use: "flush", Short: "Flush the resolved workspace session", RunE: func(cmd *cobra.Command, args []string) error {
+		report, err := buildStatus(cmd.Context())
+		if err != nil {
+			return err
+		}
+		if !report.Sync.Exists {
+			return apperrors.NewWithRemedy(apperrors.ErrMutagenUnhealthy, "Mutagen session does not exist", "run devsync sync --dry-run, then devsync sync to create it after Git safety checks pass")
+		}
+		return mutagen.Flush(cmd.Context(), mutagen.CLIRunner{}, report.Sync.SessionName)
+	}})
+	var force bool
+	recreate := &cobra.Command{Use: "recreate", Short: "Explicitly recreate the resolved workspace session", RunE: func(cmd *cobra.Command, args []string) error {
+		if !force {
+			return fmt.Errorf("recreate requires --force-recreate-session")
+		}
+		report, err := buildStatus(cmd.Context())
+		if err != nil {
+			return err
+		}
+		runner := mutagen.CLIRunner{}
+		if report.Sync.Exists {
+			if err := mutagen.Terminate(cmd.Context(), runner, report.Sync.SessionName); err != nil {
+				return err
+			}
+		}
+		_, err = mutagen.EnsureSession(cmd.Context(), runner, report.Workspace, report.Config)
+		return err
+	}}
+	recreate.Flags().BoolVar(&force, "force-recreate-session", false, "explicitly terminate and recreate the Mutagen session")
+	session.AddCommand(recreate)
+	return session
+}
+
+func newDoctorCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Validate DevSync workspace prerequisites and operational health",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDoctor(cmd.Context(), os.Stdout)
 		},
 	}
 }
@@ -110,7 +223,8 @@ func newInitCommand() *cobra.Command {
 	return cmd
 }
 
-func runSync(ctx context.Context, out *os.File) error {
+func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Logger) error {
+	logger.Debug("sync.start", map[string]string{"dry_run": fmt.Sprintf("%v", dryRun)})
 	report, err := buildStatus(ctx)
 	if err != nil {
 		return err
@@ -119,10 +233,23 @@ func runSync(ctx context.Context, out *os.File) error {
 	if !report.Safe {
 		return report.Err
 	}
+	if dryRun {
+		writePlan(out, plan.FromReport(report, true))
+		return nil
+	}
+	workspaceLock, err := lock.Acquire(report.Config.Workspace.Name, "sync")
+	if err != nil {
+		return err
+	}
+	defer workspaceLock.Release()
+	logger.Debug("sync.lock_acquired", map[string]string{"workspace": report.Config.Workspace.Name})
 
 	gitMutated := false
 	switch {
 	case report.Compare.LocalAhead > 0:
+		if err := git.CheckRemoteBranchVisible(ctx, devssh.Runner{Host: report.Config.Remote.Host}, report.Config.Remote.Path, report.Local.Branch); err != nil {
+			return err
+		}
 		fmt.Fprintln(out)
 		fmt.Fprintf(out, "Git: pushing %s to %s:%s\n", report.Local.Branch, report.Config.Remote.Host, report.Config.Remote.Path)
 		if err := git.PushBranch(ctx, report.Workspace.Root, report.Config.Remote.Host, report.Config.Remote.Path, report.Local.Branch); err != nil {
@@ -130,6 +257,9 @@ func runSync(ctx context.Context, out *os.File) error {
 		}
 		gitMutated = true
 	case report.Compare.RemoteAhead > 0:
+		if err := git.CheckRemoteBranchVisible(ctx, devssh.Runner{Host: report.Config.Remote.Host}, report.Config.Remote.Path, report.Local.Branch); err != nil {
+			return err
+		}
 		fmt.Fprintln(out)
 		fmt.Fprintf(out, "Git: pulling %s from %s:%s with --ff-only\n", report.Local.Branch, report.Config.Remote.Host, report.Config.Remote.Path)
 		if err := git.PullBranchFastForward(ctx, report.Workspace.Root, report.Config.Remote.Host, report.Config.Remote.Path, report.Local.Branch); err != nil {
@@ -169,10 +299,185 @@ func runSync(ctx context.Context, out *os.File) error {
 	if !syncState.Healthy {
 		return apperrors.New(apperrors.ErrMutagenUnhealthy, "mutagen session is not healthy after flush; inspect with mutagen sync list "+syncState.SessionName)
 	}
+	if err := syncstate.Save(syncstate.State{
+		Workspace:       report.Config.Workspace.Name,
+		SessionName:     syncState.SessionName,
+		LastFlushAt:     time.Now().UTC(),
+		LastDirection:   syncState.LastDirection,
+		LastRemoteHost:  report.Config.Remote.Host,
+		LastRemotePath:  report.Config.Remote.Path,
+		LastLocalRoot:   report.Workspace.Root,
+		LastMutagenMode: report.Config.Sync.Mode,
+	}); err != nil {
+		return err
+	}
 
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Sync complete.")
 	return nil
+}
+
+func writePlan(out io.Writer, syncPlan plan.Plan) {
+	fmt.Fprintln(out)
+	if syncPlan.DryRun {
+		fmt.Fprintln(out, "Dry run plan:")
+	} else {
+		fmt.Fprintln(out, "Plan:")
+	}
+	for _, op := range syncPlan.Ops {
+		mutation := ""
+		if op.Mutates {
+			mutation = " (mutates)"
+		}
+		fmt.Fprintf(out, "  - [%s] %s%s\n", op.Kind, op.Description, mutation)
+	}
+}
+
+func runBootstrap(ctx context.Context, out io.Writer, initWorkspace bool) error {
+	fmt.Fprintln(out, "DevSync bootstrap")
+	path, created, err := workspace.EnsureGlobalConfig()
+	if err != nil {
+		return err
+	}
+	if created {
+		fmt.Fprintf(out, "Global config: created %s\n", path)
+	} else {
+		fmt.Fprintf(out, "Global config: exists %s\n", path)
+	}
+	tool(out, "git", "Git CLI")
+	tool(out, "ssh", "SSH CLI")
+	tool(out, "mutagen", "Mutagen CLI")
+	ws, err := workspace.Discover(ctx)
+	if err != nil {
+		fmt.Fprintf(out, "Workspace: not detected (%v)\n", err)
+		return nil
+	}
+	cfg, err := workspace.ResolveConfig(ws)
+	if err != nil {
+		fmt.Fprintf(out, "Convention mapping: blocked (%v)\n", err)
+		fmt.Fprintln(out, "Hint: move the repository under the configured local root or add .devsync.yaml with an explicit remote.path.")
+		return nil
+	}
+	fmt.Fprintf(out, "Workspace: %s\n", cfg.Workspace.Name)
+	fmt.Fprintf(out, "Convention: %s -> %s\n", ws.Root, cfg.Remote.Path)
+	fmt.Fprintf(out, "Remote node: %s (%s)\n", cfg.Remote.Node, cfg.Remote.Host)
+	if initWorkspace {
+		path, err := workspace.WriteLocalOverride(ws.Root, cfg)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "Workspace override: wrote %s\n", path)
+	} else {
+		fmt.Fprintln(out, "Workspace override: skipped (use --init-workspace to write .devsync.yaml)")
+	}
+	if err := runDoctor(ctx, out); err != nil {
+		fmt.Fprintf(out, "Bootstrap validation needs attention: %v\n", err)
+		return nil
+	}
+	return nil
+}
+
+func runDoctor(ctx context.Context, out io.Writer) error {
+	fmt.Fprintln(out, "DevSync doctor")
+	tool(out, "git", "Git CLI")
+	tool(out, "ssh", "SSH CLI")
+	tool(out, "mutagen", "Mutagen CLI")
+	version(out, "git", "--version", "Local Git version")
+	version(out, "mutagen", "version", "Mutagen version")
+	disk(out, ".", "Local disk")
+	report, err := buildStatus(ctx)
+	if err != nil {
+		fmt.Fprintf(out, "Workspace: failed\n  %v\n", err)
+		return err
+	}
+	fmt.Fprintf(out, "Workspace: ok (%s)\n", report.Workspace.Root)
+	fmt.Fprintf(out, "Config: node=%s host=%s path=%s\n", report.Config.Remote.Node, report.Config.Remote.Host, report.Config.Remote.Path)
+	sshRoundTrip(ctx, out, report.Config.Remote.Host)
+	remoteVersion(ctx, out, report.Config.Remote.Host, "git --version", "Remote Git version")
+	remoteVersion(ctx, out, report.Config.Remote.Host, "df -h "+devssh.QuotePath(report.Config.Remote.Path), "Remote disk")
+	lockInspection(out, report.Config.Workspace.Name)
+	fmt.Fprintf(out, "Remote repo: ok (%s)\n", report.Remote.Branch)
+	fmt.Fprintf(out, "History: local ahead=%d remote ahead=%d known=%v\n", report.Compare.LocalAhead, report.Compare.RemoteAhead, report.Compare.Known)
+	fmt.Fprintf(out, "Mutagen: %s exists=%v healthy=%v\n", report.Sync.Status, report.Sync.Exists, report.Sync.Healthy)
+	if report.Reconcile.Needed {
+		fmt.Fprintf(out, "Reconciliation: needed (%s)\n", report.Action)
+		return report.Err
+	}
+	if !report.Safe {
+		fmt.Fprintf(out, "Safety: blocked\n  %v\n", report.Err)
+		return report.Err
+	}
+	fmt.Fprintln(out, "Safety: ok")
+	return nil
+}
+
+func tool(out io.Writer, binary string, label string) {
+	if path, err := exec.LookPath(binary); err == nil {
+		fmt.Fprintf(out, "%s: ok (%s)\n", label, path)
+		return
+	}
+	fmt.Fprintf(out, "%s: missing\n", label)
+}
+
+func version(out io.Writer, binary string, arg string, label string) {
+	args := strings.Fields(arg)
+	cmd := exec.Command(binary, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Fprintf(out, "%s: unavailable\n", label)
+		return
+	}
+	fmt.Fprintf(out, "%s: %s\n", label, strings.TrimSpace(string(output)))
+}
+
+func disk(out io.Writer, path string, label string) {
+	cmd := exec.Command("df", "-h", path)
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Fprintf(out, "%s: unavailable\n", label)
+		return
+	}
+	fmt.Fprintf(out, "%s:\n%s\n", label, strings.TrimSpace(string(output)))
+}
+
+func sshRoundTrip(ctx context.Context, out io.Writer, host string) {
+	start := time.Now()
+	_, err := devssh.Runner{Host: host}.Run(ctx, "true")
+	if err != nil {
+		fmt.Fprintf(out, "SSH round trip: failed (%v)\n", err)
+		return
+	}
+	fmt.Fprintf(out, "SSH round trip: %s\n", time.Since(start).Round(time.Millisecond))
+}
+
+func remoteVersion(ctx context.Context, out io.Writer, host string, command string, label string) {
+	output, err := devssh.Runner{Host: host}.Run(ctx, command)
+	if err != nil {
+		fmt.Fprintf(out, "%s: unavailable (%v)\n", label, err)
+		return
+	}
+	if len(output) > 400 {
+		output = output[:400]
+	}
+	fmt.Fprintf(out, "%s: %s\n", label, strings.TrimSpace(output))
+}
+
+func lockInspection(out io.Writer, workspaceName string) {
+	path, err := lock.Path(workspaceName)
+	if err != nil {
+		fmt.Fprintf(out, "Lockfile: unavailable (%v)\n", err)
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(out, "Lockfile: none (%s)\n", path)
+			return
+		}
+		fmt.Fprintf(out, "Lockfile: unreadable (%v)\n", err)
+		return
+	}
+	fmt.Fprintf(out, "Lockfile: present %s\n%s\n", path, strings.TrimSpace(string(bytes.TrimSpace(data))))
 }
 
 func buildStatus(ctx context.Context) (status.Report, error) {
@@ -196,6 +501,8 @@ func buildStatus(ctx context.Context) (status.Report, error) {
 	}
 	comparison := git.CompareHistories(ctx, ws.Root, local.Head, cfg.Remote.Host, cfg.Remote.Path, remote.Head)
 	syncState := mutagen.Inspect(ctx, cfg.Workspace.Name)
+	persisted := syncstate.Load(cfg.Workspace.Name)
+	reconciliation := mutagen.Reconcile(ws, cfg, syncState)
 
-	return status.Evaluate(ws, cfg, local, remote, comparison, syncState), nil
+	return status.Evaluate(ws, cfg, local, remote, comparison, syncState, persisted, reconciliation), nil
 }

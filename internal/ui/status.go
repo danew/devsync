@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/danew/devsync/internal/status"
 )
@@ -65,6 +66,23 @@ func WriteStatus(w io.Writer, report status.Report) {
 	}
 	if report.Sync.LastDirection != "" {
 		fmt.Fprintf(w, "  direction: %s\n", report.Sync.LastDirection)
+	}
+	if !report.Persisted.LastFlushAt.IsZero() {
+		fmt.Fprintf(w, "  last successful flush: %s\n", report.Persisted.LastFlushAt.Format(time.RFC3339))
+	} else {
+		fmt.Fprintln(w, "  last successful flush: unknown")
+	}
+	if report.Sync.Alpha != "" {
+		fmt.Fprintf(w, "  local endpoint: %s\n", report.Sync.Alpha)
+	}
+	if report.Sync.Beta != "" {
+		fmt.Fprintf(w, "  remote endpoint: %s\n", report.Sync.Beta)
+	}
+	if report.Reconcile.Needed {
+		fmt.Fprintln(w, "  reconciliation required:")
+		for _, reason := range report.Reconcile.Reasons {
+			fmt.Fprintf(w, "  - %s\n", reason)
+		}
 	}
 	if len(report.Sync.Problems) > 0 {
 		fmt.Fprintln(w, "  problems:")

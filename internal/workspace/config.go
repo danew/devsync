@@ -64,6 +64,17 @@ type GlobalConfig struct {
 	Mapping     GlobalMappingConfig   `yaml:"mapping"`
 }
 
+func DefaultGlobalConfig() GlobalConfig {
+	return GlobalConfig{
+		Nodes: map[string]NodeConfig{
+			"core-dev": {SSH: "core-dev", WorkspaceRoot: "~/workspace"},
+		},
+		DefaultNode: "core-dev",
+		Defaults:    DefaultsConfig{Ignores: append([]string{}, internalDefaultIgnores...)},
+		Mapping:     GlobalMappingConfig{LocalRoot: "~/remote"},
+	}
+}
+
 type NodeConfig struct {
 	SSH           string `yaml:"ssh"`
 	WorkspaceRoot string `yaml:"workspace_root"`
@@ -231,6 +242,29 @@ func LoadGlobalConfig() (GlobalConfig, ConfigSources, error) {
 	return cfg, sources, nil
 }
 
+func EnsureGlobalConfig() (string, bool, error) {
+	path, err := GlobalConfigPath()
+	if err != nil {
+		return "", false, err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return path, false, nil
+	} else if !os.IsNotExist(err) {
+		return "", false, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", false, err
+	}
+	data, err := yaml.Marshal(DefaultGlobalConfig())
+	if err != nil {
+		return "", false, err
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return "", false, err
+	}
+	return path, true, nil
+}
+
 func LoadLocalConfig(repoRoot string) (LocalConfig, bool, string, error) {
 	path := filepath.Join(repoRoot, LocalOverrideFile)
 	data, err := os.ReadFile(path)
@@ -286,19 +320,27 @@ func WriteLocalOverride(repoRoot string, cfg Config) (string, error) {
 }
 
 func ConfigPath(workspaceName string) (string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := DevSyncConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve user home directory: %w", err)
+		return "", err
 	}
-	return filepath.Join(home, ".config", "devsync", workspaceName+".yaml"), nil
+	return filepath.Join(dir, workspaceName+".yaml"), nil
 }
 
 func GlobalConfigPath() (string, error) {
+	dir, err := DevSyncConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, GlobalConfigFile), nil
+}
+
+func DevSyncConfigDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user home directory: %w", err)
 	}
-	return filepath.Join(home, ".config", "devsync", GlobalConfigFile), nil
+	return filepath.Join(home, ".config", "devsync"), nil
 }
 
 func LoadConfig(workspaceName string) (Config, error) {

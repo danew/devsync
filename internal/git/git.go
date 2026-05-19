@@ -45,6 +45,13 @@ func InspectLocal(ctx context.Context, root string) (State, error) {
 
 func InspectRemote(ctx context.Context, runner devssh.Runner, path string) (State, error) {
 	remotePath := devssh.QuotePath(path)
+	if _, err := runner.Run(ctx, "test -d "+remotePath); err != nil {
+		return State{}, apperrors.NewWithRemedy(apperrors.ErrRemoteRepoMissing, fmt.Sprintf("remote workspace path does not exist: %s", path), "create or clone the repository on the remote host, or update .devsync.yaml remote.path")
+	}
+	inside, err := runner.Run(ctx, "cd "+remotePath+" && git rev-parse --is-inside-work-tree")
+	if err != nil || strings.TrimSpace(inside) != "true" {
+		return State{}, apperrors.NewWithRemedy(apperrors.ErrRemoteRepoInvalid, fmt.Sprintf("remote path is not a Git work tree: %s", path), "verify the remote path points at an initialized repository")
+	}
 	branch, err := runner.Run(ctx, "cd "+remotePath+" && git branch --show-current")
 	if err != nil {
 		return State{}, err
@@ -82,6 +89,9 @@ func CompareHistories(ctx context.Context, localRoot, localHead, remoteHost, rem
 }
 
 func PushBranch(ctx context.Context, root, remoteHost, remotePath, branch string) error {
+	if err := ValidateMutationReadiness(ctx, root, branch); err != nil {
+		return err
+	}
 	remote := GitRemoteURL(remoteHost, remotePath)
 	_, err := runGit(ctx, root, "push", remote, branch+":"+branch)
 	if err != nil {
@@ -91,10 +101,41 @@ func PushBranch(ctx context.Context, root, remoteHost, remotePath, branch string
 }
 
 func PullBranchFastForward(ctx context.Context, root, remoteHost, remotePath, branch string) error {
+	if err := ValidateMutationReadiness(ctx, root, branch); err != nil {
+		return err
+	}
 	remote := GitRemoteURL(remoteHost, remotePath)
 	_, err := runGit(ctx, root, "pull", "--ff-only", remote, branch)
 	if err != nil {
 		return fmt.Errorf("pull remote commits with fast-forward only: %w", err)
+	}
+	return nil
+}
+
+func ValidateMutationReadiness(ctx context.Context, root, expectedBranch string) error {
+	state, err := InspectLocal(ctx, root)
+	if err != nil {
+		return err
+	}
+	if state.Branch == "" {
+		return apperrors.NewWithRemedy(apperrors.ErrDetachedHead, "local repository is in detached HEAD state", "checkout a branch before running devsync sync")
+	}
+	if state.Branch != expectedBranch {
+		return apperrors.NewWithRemedy(apperrors.ErrBranchMismatch, fmt.Sprintf("current branch changed during sync: expected %s, got %s", expectedBranch, state.Branch), "rerun devsync status and retry after branch state is stable")
+	}
+	return nil
+}
+
+func CheckRemoteBranchVisible(ctx context.Context, runner devssh.Runner, path, expectedBranch string) error {
+	state, err := InspectRemote(ctx, runner, path)
+	if err != nil {
+		return err
+	}
+	if state.Branch == "" {
+		return apperrors.NewWithRemedy(apperrors.ErrDetachedHead, "remote repository is in detached HEAD state", "checkout the matching branch on the remote repository")
+	}
+	if state.Branch != expectedBranch {
+		return apperrors.NewWithRemedy(apperrors.ErrBranchMismatch, fmt.Sprintf("remote branch changed during sync: expected %s, got %s", expectedBranch, state.Branch), "rerun devsync status and retry after branch state is stable")
 	}
 	return nil
 }

@@ -14,13 +14,18 @@ const (
 	ErrMutagenUnavailable     Kind = "mutagen unavailable"
 	ErrMutagenUnhealthy       Kind = "mutagen unhealthy"
 	ErrRemoteUnreachable      Kind = "remote unreachable"
+	ErrRemoteRepoMissing      Kind = "remote repo missing"
+	ErrRemoteRepoInvalid      Kind = "remote repo invalid"
 	ErrWorkspaceConfigMissing Kind = "workspace config missing"
+	ErrWorkspaceLockHeld      Kind = "workspace lock held"
+	ErrSessionDrift           Kind = "session drift"
 	ErrDetachedHead           Kind = "detached HEAD"
 )
 
 type Error struct {
 	Kind    Kind
 	Message string
+	Remedy  string
 	Err     error
 }
 
@@ -29,6 +34,9 @@ func (e *Error) Error() string {
 		return ""
 	}
 	if e.Message != "" {
+		if e.Remedy != "" {
+			return e.Message + "\nRemediation: " + e.Remedy
+		}
 		return e.Message
 	}
 	if e.Err != nil {
@@ -46,6 +54,10 @@ func (e *Error) Unwrap() error {
 
 func New(kind Kind, message string) error {
 	return &Error{Kind: kind, Message: message}
+}
+
+func NewWithRemedy(kind Kind, message string, remedy string) error {
+	return &Error{Kind: kind, Message: message, Remedy: remedy}
 }
 
 func Wrap(kind Kind, message string, err error) error {

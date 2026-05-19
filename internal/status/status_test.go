@@ -6,11 +6,12 @@ import (
 	"github.com/danew/devsync/internal/apperrors"
 	"github.com/danew/devsync/internal/git"
 	"github.com/danew/devsync/internal/mutagen"
+	"github.com/danew/devsync/internal/syncstate"
 	"github.com/danew/devsync/internal/workspace"
 )
 
 func TestEvaluateRejectsBranchMismatch(t *testing.T) {
-	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "feature"}, git.State{Branch: "main"}, git.Comparison{Known: true}, mutagen.State{})
+	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "feature"}, git.State{Branch: "main"}, git.Comparison{Known: true}, mutagen.State{}, syncstate.State{}, mutagen.Reconciliation{})
 
 	if report.Safe {
 		t.Fatal("branch mismatch must not be safe")
@@ -21,7 +22,7 @@ func TestEvaluateRejectsBranchMismatch(t *testing.T) {
 }
 
 func TestEvaluateRejectsDivergence(t *testing.T) {
-	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "main"}, git.State{Branch: "main"}, git.Comparison{Known: true, LocalAhead: 2, RemoteAhead: 4}, mutagen.State{})
+	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "main"}, git.State{Branch: "main"}, git.Comparison{Known: true, LocalAhead: 2, RemoteAhead: 4}, mutagen.State{}, syncstate.State{}, mutagen.Reconciliation{})
 
 	if report.Safe {
 		t.Fatal("divergence must not be safe")
@@ -32,9 +33,20 @@ func TestEvaluateRejectsDivergence(t *testing.T) {
 }
 
 func TestEvaluateAllowsRemoteAhead(t *testing.T) {
-	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "main"}, git.State{Branch: "main"}, git.Comparison{Known: true, RemoteAhead: 2}, mutagen.State{})
+	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "main"}, git.State{Branch: "main"}, git.Comparison{Known: true, RemoteAhead: 2}, mutagen.State{}, syncstate.State{}, mutagen.Reconciliation{})
 
 	if !report.Safe {
 		t.Fatalf("remote-ahead fast-forward should be safe: %v", report.Err)
+	}
+}
+
+func TestEvaluateRejectsSessionDrift(t *testing.T) {
+	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "main"}, git.State{Branch: "main"}, git.Comparison{Known: true}, mutagen.State{}, syncstate.State{}, mutagen.Reconciliation{Needed: true, Reasons: []string{"endpoint drift"}})
+
+	if report.Safe {
+		t.Fatal("session drift must not be safe")
+	}
+	if !apperrors.Is(report.Err, apperrors.ErrSessionDrift) {
+		t.Fatalf("expected ErrSessionDrift, got %v", report.Err)
 	}
 }
