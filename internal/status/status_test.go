@@ -50,3 +50,33 @@ func TestEvaluateRejectsSessionDrift(t *testing.T) {
 		t.Fatalf("expected ErrSessionDrift, got %v", report.Err)
 	}
 }
+
+func TestEvaluateMarksInitialSyncRiskForDirtyTrees(t *testing.T) {
+	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "main", Dirty: true}, git.State{Branch: "main"}, git.Comparison{Known: true}, mutagen.State{Exists: false}, syncstate.State{}, mutagen.Reconciliation{})
+
+	if !report.Safe {
+		t.Fatalf("initial sync risk should be visible but status-safe: %v", report.Err)
+	}
+	if !report.Initial.Pending || !report.Initial.Risky {
+		t.Fatalf("expected risky initial sync, got %#v", report.Initial)
+	}
+}
+
+func TestEvaluateMarksCleanInitialSyncPending(t *testing.T) {
+	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "main"}, git.State{Branch: "main"}, git.Comparison{Known: true}, mutagen.State{Exists: false}, syncstate.State{}, mutagen.Reconciliation{})
+
+	if !report.Initial.Pending || report.Initial.Risky {
+		t.Fatalf("expected clean initial sync pending, got %#v", report.Initial)
+	}
+}
+
+func TestEvaluateRejectsMutagenConflictsWithGuidance(t *testing.T) {
+	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "main"}, git.State{Branch: "main"}, git.Comparison{Known: true}, mutagen.State{Exists: true, Conflicts: []string{"file.go"}}, syncstate.State{}, mutagen.Reconciliation{})
+
+	if report.Safe {
+		t.Fatal("mutagen conflicts must not be safe")
+	}
+	if !apperrors.Is(report.Err, apperrors.ErrMutagenUnhealthy) {
+		t.Fatalf("expected ErrMutagenUnhealthy, got %v", report.Err)
+	}
+}

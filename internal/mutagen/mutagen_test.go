@@ -67,6 +67,28 @@ Ignores: .git, node_modules, dist`)
 	}
 }
 
+func TestParseListOutputExtractsLongEndpointURLsAndConflicts(t *testing.T) {
+	state := ParseListOutput("devsync-steel-api", `Name: devsync-steel-api
+Alpha:
+	URL: /local/steel-api
+Beta:
+	URL: core-dev:~/workspace/work/steel-api
+Conflicts:
+	(alpha) internal/workspace/config.go (<non-existent> -> File (abc))
+	(beta)  internal/workspace/config.go (<non-existent> -> File (def))
+Status: Watching for changes`)
+
+	if state.Alpha != "/local/steel-api" || state.Beta != "core-dev:~/workspace/work/steel-api" {
+		t.Fatalf("endpoints = %q/%q", state.Alpha, state.Beta)
+	}
+	if len(state.Conflicts) != 1 || state.Conflicts[0] != "internal/workspace/config.go" {
+		t.Fatalf("conflicts = %#v", state.Conflicts)
+	}
+	if state.Healthy {
+		t.Fatal("conflicts should mark session unhealthy")
+	}
+}
+
 func TestReconcileDetectsEndpointAndIgnoreDrift(t *testing.T) {
 	cfg := workspace.Config{
 		Workspace: workspace.WorkspaceIdentity{Name: "steel-api"},

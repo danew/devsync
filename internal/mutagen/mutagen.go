@@ -24,6 +24,7 @@ type State struct {
 	Beta          string
 	Ignores       []string
 	Problems      []string
+	Conflicts     []string
 	LastDirection string
 	LastFlushAt   time.Time
 	Message       string
@@ -83,7 +84,7 @@ func Inspect(ctx context.Context, workspaceName string) State {
 
 func InspectWithRunner(ctx context.Context, runner Runner, workspaceName string) (State, error) {
 	name := SessionName(workspaceName)
-	out, err := runner.Run(ctx, "sync", "list")
+	out, err := runner.Run(ctx, "sync", "list", "--long")
 	if err != nil {
 		return State{SessionName: name, Available: !apperrors.Is(err, apperrors.ErrMutagenUnavailable), Message: err.Error()}, err
 	}
@@ -164,12 +165,19 @@ func ParseListOutput(sessionName string, output string) State {
 	}
 	state.Alpha = fieldValue(output, "Alpha")
 	state.Beta = fieldValue(output, "Beta")
+	if state.Alpha == "" {
+		state.Alpha = endpointURL(output, "Alpha")
+	}
+	if state.Beta == "" {
+		state.Beta = endpointURL(output, "Beta")
+	}
 	state.Ignores = parseIgnores(output)
 	state.Healthy = !strings.Contains(lower, "problem") && !strings.Contains(lower, "conflict") && !strings.Contains(lower, "error")
 	state.Paused = strings.Contains(lower, "paused")
 	state.Status = normalizeStatus(lower, state.Healthy, state.Paused)
 	state.Active = state.Status == StatusRunning
 	state.Problems = problemLines(output)
+	state.Conflicts = conflictFiles(output)
 	state.LastDirection = directionFromOutput(lower)
 	state.Message = fmt.Sprintf("session %s detected", sessionName)
 	return state
@@ -224,6 +232,24 @@ func problemLines(output string) []string {
 	return problems
 }
 
+func conflictFiles(output string) []string {
+	seen := map[string]bool{}
+	var conflicts []string
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "(alpha) ") && !strings.HasPrefix(trimmed, "(beta) ") {
+			continue
+		}
+		trimmed = strings.TrimPrefix(strings.TrimPrefix(trimmed, "(alpha) "), "(beta) ")
+		path := strings.TrimSpace(strings.SplitN(trimmed, " (", 2)[0])
+		if path != "" && !seen[path] {
+			seen[path] = true
+			conflicts = append(conflicts, path)
+		}
+	}
+	return conflicts
+}
+
 func directionFromOutput(output string) string {
 	switch {
 	case strings.Contains(output, "alpha") && strings.Contains(output, "beta"):
@@ -258,6 +284,27 @@ func fieldValue(output string, field string) string {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(strings.ToLower(trimmed), prefix) {
 			return strings.TrimSpace(trimmed[len(field)+1:])
+		}
+	}
+	return ""
+}
+
+func endpointURL(output string, endpoint string) string {
+	lines := strings.Split(output, "\n")
+	inEndpoint := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.EqualFold(trimmed, endpoint+":") {
+			inEndpoint = true
+			continue
+		}
+		if inEndpoint && (strings.EqualFold(trimmed, "Alpha:") || strings.EqualFold(trimmed, "Beta:") || strings.EqualFold(trimmed, "Configuration:") || strings.HasSuffix(trimmed, ":")) {
+			if !strings.HasPrefix(strings.ToLower(trimmed), "url:") {
+				return ""
+			}
+		}
+		if inEndpoint && strings.HasPrefix(strings.ToLower(trimmed), "url:") {
+			return strings.TrimSpace(trimmed[len("URL:"):])
 		}
 	}
 	return ""

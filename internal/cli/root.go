@@ -238,6 +238,9 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 		return report.Err
 	}
 	if dryRun {
+		if report.Initial.Pending && report.Initial.Risky {
+			writeInitialSyncWarning(out, report)
+		}
 		writePlan(out, plan.FromReport(report, true))
 		return nil
 	}
@@ -284,6 +287,9 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 			return report.Err
 		}
 	}
+	if err := confirmInitialSync(out, report); err != nil {
+		return err
+	}
 
 	runner := mutagen.CLIRunner{}
 	started := time.Now()
@@ -309,7 +315,7 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 		return err
 	}
 	if !syncState.Healthy {
-		return apperrors.New(apperrors.ErrMutagenUnhealthy, "mutagen session is not healthy after flush; inspect with mutagen sync list "+syncState.SessionName)
+		return apperrors.NewWithRemedy(apperrors.ErrMutagenUnhealthy, "mutagen session is not healthy after flush; inspect with mutagen sync list "+syncState.SessionName, "if conflicts are present: terminate the session, reconcile working trees manually, then recreate the session explicitly")
 	}
 	if err := syncstate.Save(syncstate.State{
 		Workspace:       report.Config.Workspace.Name,
@@ -327,6 +333,43 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Sync complete.")
 	return nil
+}
+
+func confirmInitialSync(out io.Writer, report status.Report) error {
+	if !report.Initial.Pending || !report.Initial.Risky {
+		return nil
+	}
+	if !isInteractive() {
+		return initialSyncRiskError(report)
+	}
+	writeInitialSyncWarning(out, report)
+	fmt.Fprint(out, "Proceed anyway? [y/N] ")
+	answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	if answer != "y" && answer != "yes" {
+		return apperrors.NewWithRemedy(apperrors.ErrInitialSyncRisk, "initial synchronization declined", "clean both working trees or recreate the remote clone, then rerun devsync sync")
+	}
+	return nil
+}
+
+func initialSyncRiskError(report status.Report) error {
+	return apperrors.NewWithRemedy(apperrors.ErrInitialSyncRisk, "initial synchronization requires verification", "ensure local and remote working trees match, or recreate the remote clone from the latest local state, then rerun: devsync sync")
+}
+
+func writeInitialSyncWarning(out io.Writer, report status.Report) {
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Initial synchronization detected.")
+	fmt.Fprintln(out, "Local and remote repositories share Git ancestry, but working trees may differ before the first Mutagen baseline.")
+	if len(report.Initial.Reasons) > 0 {
+		fmt.Fprintln(out, "Risk indicators:")
+		for _, reason := range report.Initial.Reasons {
+			fmt.Fprintf(out, "  - %s\n", reason)
+		}
+	}
+	fmt.Fprintln(out, "Recommended:")
+	fmt.Fprintln(out, "  - clean working trees")
+	fmt.Fprintln(out, "  - matching checkouts")
+	fmt.Fprintln(out, "  - fresh remote clone before first sync")
 }
 
 func ensureWorkspaceConfigured(ctx context.Context, out io.Writer) error {

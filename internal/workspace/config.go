@@ -188,18 +188,18 @@ func ResolveConfigFromLayers(ws Workspace, global GlobalConfig, local LocalConfi
 		}
 	}
 
-	path, relative, err := inferRemotePath(ws.Root, cfg.Mapping.LocalRoot, cfg.Mapping.RemoteRoot)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.Remote.Path = path
-	cfg.Mapping.RelativePath = relative
-	cfg.Mapping.ConventionBased = true
-
 	if localFound && local.Remote.Path != "" {
 		cfg.Remote.Path = local.Remote.Path
 		cfg.Mapping.ConventionBased = false
 		cfg.Sources.RemotePathSource = "workspace override"
+	} else {
+		path, relative, err := inferRemotePath(ws.Root, cfg.Mapping.LocalRoot, cfg.Mapping.RemoteRoot)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Remote.Path = path
+		cfg.Mapping.RelativePath = relative
+		cfg.Mapping.ConventionBased = true
 	}
 
 	ignores := append([]string{}, internalDefaultIgnores...)

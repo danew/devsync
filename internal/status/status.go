@@ -17,13 +17,21 @@ type Report struct {
 	Sync      mutagen.State
 	Persisted syncstate.State
 	Reconcile mutagen.Reconciliation
+	Initial   InitialSync
 	Safe      bool
 	Action    string
 	Err       error
 }
 
+type InitialSync struct {
+	Pending bool
+	Risky   bool
+	Reasons []string
+}
+
 func Evaluate(ws workspace.Workspace, cfg workspace.Config, local git.State, remote git.State, comparison git.Comparison, sync mutagen.State, persisted syncstate.State, reconciliation mutagen.Reconciliation) Report {
 	report := Report{Workspace: ws, Config: cfg, Local: local, Remote: remote, Compare: comparison, Sync: sync, Persisted: persisted, Reconcile: reconciliation}
+	report.Initial = evaluateInitialSync(local, remote, comparison, sync)
 
 	switch {
 	case local.Branch == "":
@@ -49,6 +57,9 @@ func Evaluate(ws workspace.Workspace, cfg workspace.Config, local git.State, rem
 	case reconciliation.Needed:
 		report.Action = "mutagen session configuration drift detected; inspect and recreate manually if intended"
 		report.Err = apperrors.NewWithRemedy(apperrors.ErrSessionDrift, report.Action, reconciliation.Remedy)
+	case sync.Exists && len(sync.Conflicts) > 0:
+		report.Action = "mutagen reported filesystem conflicts; reconcile working trees manually before syncing"
+		report.Err = apperrors.NewWithRemedy(apperrors.ErrMutagenUnhealthy, report.Action, "terminate the session, reconcile affected files manually, then rerun devsync sync --dry-run")
 	case sync.Exists && !sync.Healthy:
 		report.Action = "mutagen session is unhealthy; inspect synchronization problems before syncing"
 		report.Err = apperrors.NewWithRemedy(apperrors.ErrMutagenUnhealthy, report.Action, "run devsync doctor and mutagen sync list "+sync.SessionName)
@@ -64,4 +75,24 @@ func Evaluate(ws workspace.Workspace, cfg workspace.Config, local git.State, rem
 	}
 
 	return report
+}
+
+func evaluateInitialSync(local git.State, remote git.State, comparison git.Comparison, sync mutagen.State) InitialSync {
+	if sync.Exists {
+		return InitialSync{}
+	}
+	initial := InitialSync{Pending: true}
+	if local.Dirty {
+		initial.Risky = true
+		initial.Reasons = append(initial.Reasons, "local working tree is dirty")
+	}
+	if remote.Dirty {
+		initial.Risky = true
+		initial.Reasons = append(initial.Reasons, "remote working tree is dirty")
+	}
+	if comparison.Known && (comparison.LocalAhead > 0 || comparison.RemoteAhead > 0) {
+		initial.Risky = true
+		initial.Reasons = append(initial.Reasons, "local and remote HEADs are not equal yet")
+	}
+	return initial
 }

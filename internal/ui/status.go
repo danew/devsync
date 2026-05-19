@@ -46,6 +46,15 @@ func WriteStatus(w io.Writer, report status.Report) {
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "Sync:")
+	if report.Initial.Pending {
+		if report.Initial.Risky {
+			fmt.Fprintln(w, "  state: initial synchronization risk detected")
+		} else {
+			fmt.Fprintln(w, "  state: initial synchronization pending")
+		}
+	} else {
+		fmt.Fprintln(w, "  state: established session")
+	}
 	fmt.Fprintf(w, "  session: %s\n", report.Sync.SessionName)
 	if report.Sync.Exists {
 		fmt.Fprintln(w, "  exists")
@@ -88,6 +97,13 @@ func WriteStatus(w io.Writer, report status.Report) {
 		fmt.Fprintln(w, "  problems:")
 		for _, problem := range report.Sync.Problems {
 			fmt.Fprintf(w, "  - %s\n", problem)
+		}
+		if len(report.Sync.Conflicts) > 0 {
+			fmt.Fprintln(w, "  conflict files:")
+			for _, conflict := range report.Sync.Conflicts {
+				fmt.Fprintf(w, "  - %s\n", conflict)
+			}
+			fmt.Fprintln(w, "  recovery: terminate the session, reconcile working trees manually, then recreate the session explicitly")
 		}
 	} else if report.Sync.Message != "" {
 		fmt.Fprintf(w, "  %s\n", report.Sync.Message)

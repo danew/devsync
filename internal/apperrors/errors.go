@@ -19,6 +19,7 @@ const (
 	ErrWorkspaceConfigMissing Kind = "workspace config missing"
 	ErrWorkspaceLockHeld      Kind = "workspace lock held"
 	ErrSessionDrift           Kind = "session drift"
+	ErrInitialSyncRisk        Kind = "initial sync risk"
 	ErrDetachedHead           Kind = "detached HEAD"
 )
 

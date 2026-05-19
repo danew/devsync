@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/danew/devsync/internal/apperrors"
 	"github.com/danew/devsync/internal/git"
 	"github.com/danew/devsync/internal/mutagen"
 	"github.com/danew/devsync/internal/plan"
@@ -63,6 +64,27 @@ func TestWritePlanDryRunDoesNotMutate(t *testing.T) {
 	for _, expected := range []string{"Dry run plan:", "push main", "create Mutagen session", "verify post-flush health"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("expected plan to contain %q, got:\n%s", expected, text)
+		}
+	}
+}
+
+func TestInitialSyncRiskFailsClosedWhenNonInteractive(t *testing.T) {
+	report := status.Report{Initial: status.InitialSync{Pending: true, Risky: true, Reasons: []string{"local working tree is dirty"}}}
+
+	err := confirmInitialSync(&bytes.Buffer{}, report)
+	if !apperrors.Is(err, apperrors.ErrInitialSyncRisk) {
+		t.Fatalf("expected ErrInitialSyncRisk, got %v", err)
+	}
+}
+
+func TestWriteInitialSyncWarningIncludesGuidance(t *testing.T) {
+	report := status.Report{Initial: status.InitialSync{Pending: true, Risky: true, Reasons: []string{"remote working tree is dirty"}}}
+	var out bytes.Buffer
+	writeInitialSyncWarning(&out, report)
+	text := out.String()
+	for _, expected := range []string{"Initial synchronization detected", "remote working tree is dirty", "fresh remote clone"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected warning to contain %q, got:\n%s", expected, text)
 		}
 	}
 }
