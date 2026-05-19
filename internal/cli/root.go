@@ -2,12 +2,12 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
 
+	"github.com/danew/devsync/internal/apperrors"
 	"github.com/danew/devsync/internal/git"
 	"github.com/danew/devsync/internal/mutagen"
 	devssh "github.com/danew/devsync/internal/ssh"
@@ -94,9 +94,10 @@ func newInitCommand() *cobra.Command {
 				return fmt.Errorf("init requires --remote-host and --remote-path")
 			}
 			cfg := workspace.DefaultConfig(ws.Name)
+			cfg.Remote.Node = remoteHost
 			cfg.Remote.Host = remoteHost
 			cfg.Remote.Path = remotePath
-			path, err := workspace.WriteConfig(cfg)
+			path, err := workspace.WriteLocalOverride(ws.Root, cfg)
 			if err != nil {
 				return err
 			}
@@ -116,10 +117,61 @@ func runSync(ctx context.Context, out *os.File) error {
 	}
 	ui.WriteStatus(out, report)
 	if !report.Safe {
-		return errors.New(report.Action)
+		return report.Err
 	}
+
+	gitMutated := false
+	switch {
+	case report.Compare.LocalAhead > 0:
+		fmt.Fprintln(out)
+		fmt.Fprintf(out, "Git: pushing %s to %s:%s\n", report.Local.Branch, report.Config.Remote.Host, report.Config.Remote.Path)
+		if err := git.PushBranch(ctx, report.Workspace.Root, report.Config.Remote.Host, report.Config.Remote.Path, report.Local.Branch); err != nil {
+			return err
+		}
+		gitMutated = true
+	case report.Compare.RemoteAhead > 0:
+		fmt.Fprintln(out)
+		fmt.Fprintf(out, "Git: pulling %s from %s:%s with --ff-only\n", report.Local.Branch, report.Config.Remote.Host, report.Config.Remote.Path)
+		if err := git.PullBranchFastForward(ctx, report.Workspace.Root, report.Config.Remote.Host, report.Config.Remote.Path, report.Local.Branch); err != nil {
+			return err
+		}
+		gitMutated = true
+	}
+	if gitMutated {
+		report, err = buildStatus(ctx)
+		if err != nil {
+			return err
+		}
+		if !report.Safe {
+			return report.Err
+		}
+	}
+
+	runner := mutagen.CLIRunner{}
+	syncState, err := mutagen.EnsureSession(ctx, runner, report.Workspace, report.Config)
+	if err != nil {
+		return err
+	}
+	if syncState.Paused {
+		fmt.Fprintf(out, "Mutagen: resuming session %s\n", syncState.SessionName)
+		if err := mutagen.Resume(ctx, runner, syncState.SessionName); err != nil {
+			return err
+		}
+	}
+	fmt.Fprintf(out, "Mutagen: flushing session %s\n", syncState.SessionName)
+	if err := mutagen.Flush(ctx, runner, syncState.SessionName); err != nil {
+		return err
+	}
+	syncState, err = mutagen.InspectWithRunner(ctx, runner, report.Config.Workspace.Name)
+	if err != nil {
+		return err
+	}
+	if !syncState.Healthy {
+		return apperrors.New(apperrors.ErrMutagenUnhealthy, "mutagen session is not healthy after flush; inspect with mutagen sync list "+syncState.SessionName)
+	}
+
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Sync orchestration is not implemented yet; Git state passed v1 safety checks.")
+	fmt.Fprintln(out, "Sync complete.")
 	return nil
 }
 
@@ -128,7 +180,7 @@ func buildStatus(ctx context.Context) (status.Report, error) {
 	if err != nil {
 		return status.Report{}, err
 	}
-	cfg, err := workspace.LoadConfig(ws.Name)
+	cfg, err := workspace.ResolveConfig(ws)
 	if err != nil {
 		return status.Report{}, err
 	}
@@ -143,7 +195,7 @@ func buildStatus(ctx context.Context) (status.Report, error) {
 		return status.Report{}, err
 	}
 	comparison := git.CompareHistories(ctx, ws.Root, local.Head, cfg.Remote.Host, cfg.Remote.Path, remote.Head)
-	syncState := mutagen.Inspect(ctx, cfg.Workspace)
+	syncState := mutagen.Inspect(ctx, cfg.Workspace.Name)
 
 	return status.Evaluate(ws, cfg, local, remote, comparison, syncState), nil
 }

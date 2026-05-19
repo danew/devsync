@@ -4,82 +4,283 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/danew/devsync/internal/apperrors"
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	LocalOverrideFile = ".devsync.yaml"
+	GlobalConfigFile  = "config.yaml"
+)
+
+var internalDefaultIgnores = []string{".git", "node_modules", "dist", "build", ".cache", ".next", "coverage"}
+
 type Config struct {
-	Workspace string       `yaml:"workspace"`
-	Remote    RemoteConfig `yaml:"remote"`
-	Sync      SyncConfig   `yaml:"sync"`
-	Ignore    []string     `yaml:"ignore"`
+	Workspace WorkspaceIdentity
+	Remote    RemoteConfig
+	Sync      SyncConfig
+	Mapping   MappingConfig
+	Sources   ConfigSources
+}
+
+type WorkspaceIdentity struct {
+	Name string
 }
 
 type RemoteConfig struct {
+	Node string
+	Host string
+	Path string
+}
+
+type SyncConfig struct {
+	Mode    string
+	Ignores []string
+}
+
+type MappingConfig struct {
+	LocalRoot       string
+	RemoteRoot      string
+	RelativePath    string
+	ConventionBased bool
+}
+
+type ConfigSources struct {
+	GlobalPath         string
+	GlobalLoaded       bool
+	LocalOverridePath  string
+	LocalOverrideFound bool
+	RemoteNodeSource   string
+	RemotePathSource   string
+	IgnoreSource       string
+}
+
+type GlobalConfig struct {
+	Nodes       map[string]NodeConfig `yaml:"nodes"`
+	DefaultNode string                `yaml:"default_node"`
+	Defaults    DefaultsConfig        `yaml:"defaults"`
+	Mapping     GlobalMappingConfig   `yaml:"mapping"`
+}
+
+type NodeConfig struct {
+	SSH           string `yaml:"ssh"`
+	WorkspaceRoot string `yaml:"workspace_root"`
+}
+
+type DefaultsConfig struct {
+	Ignores []string `yaml:"ignores"`
+}
+
+type GlobalMappingConfig struct {
+	LocalRoot string `yaml:"local_root"`
+}
+
+type LocalConfig struct {
+	Workspace string            `yaml:"workspace"`
+	Remote    LocalRemoteConfig `yaml:"remote"`
+	Sync      LocalSyncConfig   `yaml:"sync"`
+	Ignore    []string          `yaml:"ignore"`
+}
+
+type LocalRemoteConfig struct {
+	Node string `yaml:"node"`
 	Host string `yaml:"host"`
 	Path string `yaml:"path"`
 }
 
-type SyncConfig struct {
-	Mode string `yaml:"mode"`
+type LocalSyncConfig struct {
+	Mode    string   `yaml:"mode"`
+	Ignores []string `yaml:"ignores"`
 }
 
 func DefaultConfig(name string) Config {
 	return Config{
-		Workspace: name,
-		Sync:      SyncConfig{Mode: "mutagen"},
-		Ignore:    []string{".git", "node_modules", "dist", "build", ".cache", ".next", "coverage"},
+		Workspace: WorkspaceIdentity{Name: name},
+		Remote:    RemoteConfig{Node: "core-dev", Host: "core-dev"},
+		Sync:      SyncConfig{Mode: "mutagen", Ignores: append([]string{}, internalDefaultIgnores...)},
+		Mapping:   MappingConfig{LocalRoot: "~/remote", RemoteRoot: "~/workspace", ConventionBased: true},
 	}
 }
 
-func LoadConfig(workspaceName string) (Config, error) {
-	path, err := ConfigPath(workspaceName)
+func ResolveConfig(ws Workspace) (Config, error) {
+	global, sources, err := LoadGlobalConfig()
 	if err != nil {
 		return Config{}, err
 	}
-	data, err := os.ReadFile(path)
+	local, localFound, localPath, err := LoadLocalConfig(ws.Root)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return Config{}, fmt.Errorf("workspace config not found: %s (run devsync init)", path)
+		return Config{}, err
+	}
+	sources.LocalOverridePath = localPath
+	sources.LocalOverrideFound = localFound
+	return ResolveConfigFromLayers(ws, global, local, localFound, sources)
+}
+
+func ResolveConfigFromLayers(ws Workspace, global GlobalConfig, local LocalConfig, localFound bool, sources ConfigSources) (Config, error) {
+	cfg := DefaultConfig(ws.Name)
+	cfg.Sources = sources
+	cfg.Sources.RemoteNodeSource = "convention"
+	cfg.Sources.RemotePathSource = "convention"
+	cfg.Sources.IgnoreSource = "internal defaults"
+
+	if global.Mapping.LocalRoot != "" {
+		cfg.Mapping.LocalRoot = global.Mapping.LocalRoot
+	}
+	if global.DefaultNode != "" {
+		cfg.Remote.Node = global.DefaultNode
+		cfg.Remote.Host = global.DefaultNode
+		cfg.Sources.RemoteNodeSource = "global config"
+	} else if len(global.Nodes) == 1 {
+		for node := range global.Nodes {
+			cfg.Remote.Node = node
+			cfg.Remote.Host = node
+			cfg.Sources.RemoteNodeSource = "global config"
 		}
-		return Config{}, fmt.Errorf("read workspace config: %w", err)
 	}
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return Config{}, fmt.Errorf("parse workspace config %s: %w", path, err)
+
+	if node, ok := global.Nodes[cfg.Remote.Node]; ok {
+		if node.SSH != "" {
+			cfg.Remote.Host = node.SSH
+		}
+		if node.WorkspaceRoot != "" {
+			cfg.Mapping.RemoteRoot = node.WorkspaceRoot
+		}
 	}
-	if cfg.Workspace == "" {
-		cfg.Workspace = workspaceName
+
+	if localFound {
+		if local.Workspace != "" {
+			cfg.Workspace.Name = local.Workspace
+		}
+		if local.Remote.Node != "" {
+			cfg.Remote.Node = local.Remote.Node
+			cfg.Remote.Host = local.Remote.Node
+			cfg.Sources.RemoteNodeSource = "workspace override"
+		}
+		if local.Remote.Host != "" {
+			cfg.Remote.Host = local.Remote.Host
+			cfg.Sources.RemoteNodeSource = "workspace override"
+		}
+		if node, ok := global.Nodes[cfg.Remote.Node]; ok {
+			if node.SSH != "" && local.Remote.Host == "" {
+				cfg.Remote.Host = node.SSH
+			}
+			if node.WorkspaceRoot != "" {
+				cfg.Mapping.RemoteRoot = node.WorkspaceRoot
+			}
+		}
+		if local.Sync.Mode != "" {
+			cfg.Sync.Mode = local.Sync.Mode
+		}
 	}
-	if cfg.Remote.Host == "" {
-		return Config{}, fmt.Errorf("workspace config missing remote.host")
+
+	path, relative, err := inferRemotePath(ws.Root, cfg.Mapping.LocalRoot, cfg.Mapping.RemoteRoot)
+	if err != nil {
+		return Config{}, err
 	}
-	if cfg.Remote.Path == "" {
-		return Config{}, fmt.Errorf("workspace config missing remote.path")
+	cfg.Remote.Path = path
+	cfg.Mapping.RelativePath = relative
+	cfg.Mapping.ConventionBased = true
+
+	if localFound && local.Remote.Path != "" {
+		cfg.Remote.Path = local.Remote.Path
+		cfg.Mapping.ConventionBased = false
+		cfg.Sources.RemotePathSource = "workspace override"
 	}
-	if cfg.Sync.Mode == "" {
-		cfg.Sync.Mode = "mutagen"
+
+	ignores := append([]string{}, internalDefaultIgnores...)
+	if len(global.Defaults.Ignores) > 0 {
+		ignores = append(ignores, global.Defaults.Ignores...)
+		cfg.Sources.IgnoreSource = "internal defaults + global config"
 	}
-	if !contains(cfg.Ignore, ".git") {
-		cfg.Ignore = append([]string{".git"}, cfg.Ignore...)
+	if localFound && (len(local.Sync.Ignores) > 0 || len(local.Ignore) > 0) {
+		ignores = append(ignores, local.Sync.Ignores...)
+		ignores = append(ignores, local.Ignore...)
+		cfg.Sources.IgnoreSource = "internal defaults + global config + workspace override"
+	}
+	cfg.Sync.Ignores = normalizeIgnores(ignores)
+
+	if cfg.Workspace.Name == "" {
+		return Config{}, fmt.Errorf("workspace identity could not be resolved")
+	}
+	if cfg.Remote.Node == "" || cfg.Remote.Host == "" || cfg.Remote.Path == "" {
+		return Config{}, fmt.Errorf("remote configuration could not be resolved safely")
 	}
 	return cfg, nil
 }
 
+func LoadGlobalConfig() (GlobalConfig, ConfigSources, error) {
+	path, err := GlobalConfigPath()
+	if err != nil {
+		return GlobalConfig{}, ConfigSources{}, err
+	}
+	sources := ConfigSources{GlobalPath: path}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return GlobalConfig{}, sources, nil
+		}
+		return GlobalConfig{}, sources, fmt.Errorf("read global config: %w", err)
+	}
+	var cfg GlobalConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return GlobalConfig{}, sources, fmt.Errorf("parse global config %s: %w", path, err)
+	}
+	sources.GlobalLoaded = true
+	return cfg, sources, nil
+}
+
+func LoadLocalConfig(repoRoot string) (LocalConfig, bool, string, error) {
+	path := filepath.Join(repoRoot, LocalOverrideFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return LocalConfig{}, false, path, nil
+		}
+		return LocalConfig{}, false, path, fmt.Errorf("read workspace override: %w", err)
+	}
+	var cfg LocalConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return LocalConfig{}, false, path, fmt.Errorf("parse workspace override %s: %w", path, err)
+	}
+	return cfg, true, path, nil
+}
+
 func WriteConfig(cfg Config) (string, error) {
-	path, err := ConfigPath(cfg.Workspace)
+	path, err := ConfigPath(cfg.Workspace.Name)
 	if err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", fmt.Errorf("create config directory: %w", err)
 	}
-	data, err := yaml.Marshal(cfg)
+	data, err := yaml.Marshal(LocalConfig{
+		Workspace: cfg.Workspace.Name,
+		Remote:    LocalRemoteConfig{Node: cfg.Remote.Node, Host: cfg.Remote.Host, Path: cfg.Remote.Path},
+		Sync:      LocalSyncConfig{Mode: cfg.Sync.Mode, Ignores: cfg.Sync.Ignores},
+	})
 	if err != nil {
 		return "", fmt.Errorf("render workspace config: %w", err)
 	}
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return "", fmt.Errorf("write workspace config: %w", err)
+	}
+	return path, nil
+}
+
+func WriteLocalOverride(repoRoot string, cfg Config) (string, error) {
+	path := filepath.Join(repoRoot, LocalOverrideFile)
+	data, err := yaml.Marshal(LocalConfig{
+		Workspace: cfg.Workspace.Name,
+		Remote:    LocalRemoteConfig{Node: cfg.Remote.Node, Host: cfg.Remote.Host, Path: cfg.Remote.Path},
+		Sync:      LocalSyncConfig{Mode: cfg.Sync.Mode, Ignores: cfg.Sync.Ignores},
+	})
+	if err != nil {
+		return "", fmt.Errorf("render workspace override: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return "", fmt.Errorf("write workspace override: %w", err)
 	}
 	return path, nil
 }
@@ -92,11 +293,76 @@ func ConfigPath(workspaceName string) (string, error) {
 	return filepath.Join(home, ".config", "devsync", workspaceName+".yaml"), nil
 }
 
-func contains(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
+func GlobalConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home directory: %w", err)
 	}
-	return false
+	return filepath.Join(home, ".config", "devsync", GlobalConfigFile), nil
+}
+
+func LoadConfig(workspaceName string) (Config, error) {
+	path, err := ConfigPath(workspaceName)
+	if err != nil {
+		return Config{}, err
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return Config{}, apperrors.New(apperrors.ErrWorkspaceConfigMissing, fmt.Sprintf("workspace config not found: %s (run devsync init)", path))
+		}
+		return Config{}, err
+	}
+	return Config{}, fmt.Errorf("legacy per-workspace config loading is no longer used by commands; use ResolveConfig")
+}
+
+func inferRemotePath(localPath, localRoot, remoteRoot string) (string, string, error) {
+	localAbs, err := expandPath(localPath)
+	if err != nil {
+		return "", "", err
+	}
+	rootAbs, err := expandPath(localRoot)
+	if err != nil {
+		return "", "", err
+	}
+	relative, err := filepath.Rel(rootAbs, localAbs)
+	if err != nil {
+		return "", "", fmt.Errorf("infer workspace mapping: %w", err)
+	}
+	if relative == "." || relative == ".." || strings.HasPrefix(relative, "../") {
+		return "", "", fmt.Errorf("local workspace %s is outside configured local root %s", localPath, localRoot)
+	}
+	return joinRemotePath(remoteRoot, filepath.ToSlash(relative)), filepath.ToSlash(relative), nil
+}
+
+func expandPath(path string) (string, error) {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(home, strings.TrimPrefix(path, "~/"))
+	}
+	return filepath.Abs(path)
+}
+
+func joinRemotePath(root, relative string) string {
+	root = strings.TrimRight(root, "/")
+	if relative == "" || relative == "." {
+		return root
+	}
+	return root + "/" + relative
+}
+
+func normalizeIgnores(values []string) []string {
+	seen := map[string]bool{".git": true}
+	result := []string{".git"}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || value == ".git" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
 }

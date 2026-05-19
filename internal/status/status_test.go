@@ -1,0 +1,40 @@
+package status
+
+import (
+	"testing"
+
+	"github.com/danew/devsync/internal/apperrors"
+	"github.com/danew/devsync/internal/git"
+	"github.com/danew/devsync/internal/mutagen"
+	"github.com/danew/devsync/internal/workspace"
+)
+
+func TestEvaluateRejectsBranchMismatch(t *testing.T) {
+	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "feature"}, git.State{Branch: "main"}, git.Comparison{Known: true}, mutagen.State{})
+
+	if report.Safe {
+		t.Fatal("branch mismatch must not be safe")
+	}
+	if !apperrors.Is(report.Err, apperrors.ErrBranchMismatch) {
+		t.Fatalf("expected ErrBranchMismatch, got %v", report.Err)
+	}
+}
+
+func TestEvaluateRejectsDivergence(t *testing.T) {
+	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "main"}, git.State{Branch: "main"}, git.Comparison{Known: true, LocalAhead: 2, RemoteAhead: 4}, mutagen.State{})
+
+	if report.Safe {
+		t.Fatal("divergence must not be safe")
+	}
+	if !apperrors.Is(report.Err, apperrors.ErrHistoryDiverged) {
+		t.Fatalf("expected ErrHistoryDiverged, got %v", report.Err)
+	}
+}
+
+func TestEvaluateAllowsRemoteAhead(t *testing.T) {
+	report := Evaluate(workspace.Workspace{}, workspace.Config{}, git.State{Branch: "main"}, git.State{Branch: "main"}, git.Comparison{Known: true, RemoteAhead: 2}, mutagen.State{})
+
+	if !report.Safe {
+		t.Fatalf("remote-ahead fast-forward should be safe: %v", report.Err)
+	}
+}

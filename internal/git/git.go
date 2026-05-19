@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/danew/devsync/internal/apperrors"
 	devssh "github.com/danew/devsync/internal/ssh"
 )
 
@@ -71,13 +72,35 @@ func CompareHistories(ctx context.Context, localRoot, localHead, remoteHost, rem
 	command := "cd " + devssh.QuotePath(remotePath) + " && git rev-list --left-right --count " + devssh.Quote(localHead+"..."+remoteHead)
 	out, err := runner.Run(ctx, command)
 	if err != nil {
-		return Comparison{Known: false, Err: fmt.Errorf("unable to compare histories; neither repository can see both HEAD commits")}
+		return Comparison{Known: false, Err: apperrors.New(apperrors.ErrHistoryUnknown, "unable to compare histories; neither repository can see both HEAD commits")}
 	}
 	comparison, err := parseRevListCount(out)
 	if err != nil {
 		return Comparison{Known: false, Err: err}
 	}
 	return comparison
+}
+
+func PushBranch(ctx context.Context, root, remoteHost, remotePath, branch string) error {
+	remote := GitRemoteURL(remoteHost, remotePath)
+	_, err := runGit(ctx, root, "push", remote, branch+":"+branch)
+	if err != nil {
+		return fmt.Errorf("push local commits to remote branch: %w", err)
+	}
+	return nil
+}
+
+func PullBranchFastForward(ctx context.Context, root, remoteHost, remotePath, branch string) error {
+	remote := GitRemoteURL(remoteHost, remotePath)
+	_, err := runGit(ctx, root, "pull", "--ff-only", remote, branch)
+	if err != nil {
+		return fmt.Errorf("pull remote commits with fast-forward only: %w", err)
+	}
+	return nil
+}
+
+func GitRemoteURL(host, path string) string {
+	return host + ":" + path
 }
 
 func compareLocal(ctx context.Context, root, localHead, remoteHead string) (Comparison, error) {

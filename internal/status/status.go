@@ -1,6 +1,7 @@
 package status
 
 import (
+	"github.com/danew/devsync/internal/apperrors"
 	"github.com/danew/devsync/internal/git"
 	"github.com/danew/devsync/internal/mutagen"
 	"github.com/danew/devsync/internal/workspace"
@@ -15,6 +16,7 @@ type Report struct {
 	Sync      mutagen.State
 	Safe      bool
 	Action    string
+	Err       error
 }
 
 func Evaluate(ws workspace.Workspace, cfg workspace.Config, local git.State, remote git.State, comparison git.Comparison, sync mutagen.State) Report {
@@ -23,18 +25,24 @@ func Evaluate(ws workspace.Workspace, cfg workspace.Config, local git.State, rem
 	switch {
 	case local.Branch == "":
 		report.Action = "local repository is in detached HEAD state; checkout a branch before syncing"
+		report.Err = apperrors.New(apperrors.ErrDetachedHead, report.Action)
 	case remote.Branch == "":
 		report.Action = "remote repository is in detached HEAD state; checkout a branch before syncing"
+		report.Err = apperrors.New(apperrors.ErrDetachedHead, report.Action)
 	case local.Branch != remote.Branch:
 		report.Action = "branch mismatch; checkout matching branches manually before syncing"
+		report.Err = apperrors.New(apperrors.ErrBranchMismatch, report.Action)
 	case !comparison.Known:
 		if comparison.Err != nil {
 			report.Action = comparison.Err.Error()
+			report.Err = comparison.Err
 		} else {
 			report.Action = "history comparison is unknown; aborting safely"
+			report.Err = apperrors.New(apperrors.ErrHistoryUnknown, report.Action)
 		}
 	case comparison.LocalAhead > 0 && comparison.RemoteAhead > 0:
 		report.Action = "workspace histories diverged; resolve manually before syncing"
+		report.Err = apperrors.New(apperrors.ErrHistoryDiverged, report.Action)
 	case comparison.LocalAhead > 0:
 		report.Safe = true
 		report.Action = "safe to push local commits before synchronization"
