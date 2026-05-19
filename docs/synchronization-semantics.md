@@ -43,6 +43,24 @@ Recommended first-sync hygiene:
 
 DevSync does not automatically converge divergent working trees. Mutagen conflicts are surfaced for manual recovery.
 
+## One-Shot Synchronization
+
+`devsync sync` is intentionally bounded. It resumes or creates the Mutagen session, flushes synchronization, then pauses the session before exiting.
+
+This means filesystem propagation happens during explicit DevSync operations, not continuously in the background. If continuous synchronization is desired, use `devsync attach` intentionally and `devsync detach` when finished.
+
+Status output shows the active mode:
+
+```text
+mode: one-shot
+```
+
+or:
+
+```text
+mode: attached (continuous)
+```
+
 ## Drift
 
 Session drift means the existing Mutagen session no longer matches the resolved local endpoint, remote endpoint, or ignore rules. DevSync reports drift and requires explicit recreation.

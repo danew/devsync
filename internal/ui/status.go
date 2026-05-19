@@ -46,6 +46,11 @@ func WriteStatus(w io.Writer, report status.Report) {
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "Sync:")
+	if report.Sync.Active {
+		fmt.Fprintln(w, "  mode: attached (continuous)")
+	} else {
+		fmt.Fprintln(w, "  mode: one-shot")
+	}
 	if report.Initial.Pending {
 		if report.Initial.Risky {
 			fmt.Fprintln(w, "  state: initial synchronization risk detected")

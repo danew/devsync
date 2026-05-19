@@ -43,14 +43,15 @@ func FromReport(report status.Report, dryRun bool) Plan {
 		ops = append(ops, Operation{Kind: Check, Description: "no Git ref update required", Mutates: false})
 	}
 	if report.Sync.Exists {
-		ops = append(ops, Operation{Kind: MutagenOp, Description: "reuse Mutagen session " + report.Sync.SessionName, Mutates: false})
+		ops = append(ops, Operation{Kind: MutagenOp, Description: "reuse Mutagen session " + report.Sync.SessionName + " for one-shot synchronization", Mutates: false})
 	} else {
 		ops = append(ops, Operation{Kind: MutagenOp, Description: "create Mutagen session " + report.Sync.SessionName, Mutates: true})
 	}
 	if report.Sync.Paused {
-		ops = append(ops, Operation{Kind: MutagenOp, Description: "resume Mutagen session", Mutates: true})
+		ops = append(ops, Operation{Kind: MutagenOp, Description: "resume Mutagen session for one-shot flush", Mutates: true})
 	}
 	ops = append(ops, Operation{Kind: MutagenOp, Description: "flush Mutagen session", Mutates: true})
+	ops = append(ops, Operation{Kind: MutagenOp, Description: "pause Mutagen session after one-shot flush", Mutates: true})
 	ops = append(ops, Operation{Kind: Check, Description: "verify post-flush health", Mutates: false})
 	return Plan{Workspace: report.Config.Workspace.Name, DryRun: dryRun, Ops: ops}
 }

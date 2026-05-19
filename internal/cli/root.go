@@ -63,22 +63,30 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(newVersionCommand())
 	root.AddCommand(newSessionCommand())
 	root.AddCommand(newInitCommand())
-	root.AddCommand(&cobra.Command{
-		Use:   "attach",
-		Short: "Attach to a Mutagen sync session (not implemented in v1 scaffold)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("attach is intentionally not implemented yet")
-		},
-	})
-	root.AddCommand(&cobra.Command{
-		Use:   "detach",
-		Short: "Detach from a Mutagen sync session (not implemented in v1 scaffold)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("detach is intentionally not implemented yet")
-		},
-	})
+	root.AddCommand(newAttachCommand())
+	root.AddCommand(newDetachCommand())
 
 	return root
+}
+
+func newAttachCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "attach",
+		Short: "Attach continuous synchronization intentionally",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAttach(cmd.Context(), os.Stdout, mutagen.CLIRunner{})
+		},
+	}
+}
+
+func newDetachCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "detach",
+		Short: "Pause continuous synchronization",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDetach(cmd.Context(), os.Stdout, mutagen.CLIRunner{})
+		},
+	}
 }
 
 func newStatusCommand() *cobra.Command {
@@ -100,7 +108,7 @@ func newSyncCommand(options *cliOptions) *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "sync",
-		Short: "Validate Git state and prepare safe workspace synchronization",
+		Short: "Run one-shot workspace synchronization",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := logging.New(options.debug, options.trace, os.Stderr)
 			return runSync(cmd.Context(), os.Stdout, dryRun, logger)
@@ -191,8 +199,11 @@ func newSessionCommand() *cobra.Command {
 				return err
 			}
 		}
-		_, err = mutagen.EnsureSession(cmd.Context(), runner, report.Workspace, report.Config)
-		return err
+		syncState, err := mutagen.EnsureSession(cmd.Context(), runner, report.Workspace, report.Config)
+		if err != nil {
+			return err
+		}
+		return mutagen.Pause(cmd.Context(), runner, syncState.SessionName)
 	}}
 	recreate.Flags().BoolVar(&force, "force-recreate-session", false, "explicitly terminate and recreate the Mutagen session")
 	session.AddCommand(recreate)
@@ -289,32 +300,52 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 		return err
 	}
 
-	runner := mutagen.CLIRunner{}
+	if err := runOneShotMutagen(syncCtx, out, mutagen.CLIRunner{}, report, logger); err != nil {
+		return err
+	}
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Sync complete.")
+	return nil
+}
+
+func runOneShotMutagen(ctx context.Context, out io.Writer, runner mutagen.Runner, report status.Report, logger logging.Logger) error {
 	started := time.Now()
-	syncState, err := mutagen.EnsureSession(syncCtx, runner, report.Workspace, report.Config)
+	syncState, err := mutagen.EnsureSession(ctx, runner, report.Workspace, report.Config)
 	if err != nil {
 		return err
 	}
+	oneShotPaused := false
+	defer func() {
+		if !oneShotPaused {
+			pauseOneShotSession(syncState.SessionName, runner, logger)
+		}
+	}()
 	logger.Debug("sync.ensure_session", map[string]string{"duration": time.Since(started).String(), "session": syncState.SessionName})
 	if syncState.Paused {
 		fmt.Fprintf(out, "Mutagen: resuming session %s\n", syncState.SessionName)
-		if err := mutagen.Resume(syncCtx, runner, syncState.SessionName); err != nil {
+		if err := mutagen.Resume(ctx, runner, syncState.SessionName); err != nil {
 			return err
 		}
 	}
 	fmt.Fprintf(out, "Mutagen: flushing session %s\n", syncState.SessionName)
 	started = time.Now()
-	if err := mutagen.Flush(syncCtx, runner, syncState.SessionName); err != nil {
+	if err := mutagen.Flush(ctx, runner, syncState.SessionName); err != nil {
 		return err
 	}
 	logger.Debug("sync.flush", map[string]string{"duration": time.Since(started).String(), "session": syncState.SessionName})
-	syncState, err = mutagen.InspectWithRunner(syncCtx, runner, report.Config.Workspace.Name)
+	syncState, err = mutagen.InspectWithRunner(ctx, runner, report.Config.Workspace.Name)
 	if err != nil {
 		return err
 	}
 	if !syncState.Healthy {
 		return apperrors.NewWithRemedy(apperrors.ErrMutagenUnhealthy, "mutagen session is not healthy after flush; inspect with mutagen sync list "+syncState.SessionName, "if conflicts are present: terminate the session, reconcile working trees manually, then recreate the session explicitly")
 	}
+	fmt.Fprintf(out, "Mutagen: pausing one-shot session %s\n", syncState.SessionName)
+	if err := mutagen.Pause(ctx, runner, syncState.SessionName); err != nil {
+		return err
+	}
+	oneShotPaused = true
 	if err := syncstate.Save(syncstate.State{
 		Workspace:       report.Config.Workspace.Name,
 		SessionName:     syncState.SessionName,
@@ -327,9 +358,73 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 	}); err != nil {
 		return err
 	}
+	return nil
+}
 
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Sync complete.")
+func pauseOneShotSession(sessionName string, runner mutagen.Runner, logger logging.Logger) {
+	if sessionName == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := mutagen.Pause(ctx, runner, sessionName); err != nil {
+		logger.Debug("sync.pause_after_exit_failed", map[string]string{"session": sessionName, "error": err.Error()})
+		return
+	}
+	logger.Debug("sync.pause_after_exit", map[string]string{"session": sessionName})
+}
+
+func runAttach(ctx context.Context, out io.Writer, runner mutagen.Runner) error {
+	report, err := buildStatus(ctx)
+	if err != nil {
+		return err
+	}
+	ui.WriteStatus(out, report)
+	return runAttachMutagen(ctx, out, runner, report)
+}
+
+func runAttachMutagen(ctx context.Context, out io.Writer, runner mutagen.Runner, report status.Report) error {
+	if !report.Safe {
+		return report.Err
+	}
+	syncState, err := mutagen.EnsureSession(ctx, runner, report.Workspace, report.Config)
+	if err != nil {
+		return err
+	}
+	if syncState.Paused {
+		fmt.Fprintf(out, "Mutagen: resuming continuous session %s\n", syncState.SessionName)
+		if err := mutagen.Resume(ctx, runner, syncState.SessionName); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintf(out, "Mutagen: continuous session active %s\n", syncState.SessionName)
+	}
+	fmt.Fprintln(out, "Attached. Continuous synchronization is active until devsync detach.")
+	return nil
+}
+
+func runDetach(ctx context.Context, out io.Writer, runner mutagen.Runner) error {
+	report, err := buildStatus(ctx)
+	if err != nil {
+		return err
+	}
+	return runDetachMutagen(ctx, out, runner, report)
+}
+
+func runDetachMutagen(ctx context.Context, out io.Writer, runner mutagen.Runner, report status.Report) error {
+	if !report.Sync.Exists {
+		fmt.Fprintf(out, "Mutagen: no session to detach (%s)\n", report.Sync.SessionName)
+		return nil
+	}
+	if report.Sync.Paused {
+		fmt.Fprintf(out, "Mutagen: session already detached %s\n", report.Sync.SessionName)
+		return nil
+	}
+	fmt.Fprintf(out, "Mutagen: pausing continuous session %s\n", report.Sync.SessionName)
+	if err := mutagen.Pause(ctx, runner, report.Sync.SessionName); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "Detached. Background synchronization is stopped.")
 	return nil
 }
 

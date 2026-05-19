@@ -21,7 +21,7 @@ DevSync has one authority model: Git history determines synchronization safety.
 5. Acquire local workspace lock.
 6. Discover or create Mutagen session.
 7. Abort on session drift unless the user explicitly recreates it.
-8. Resume if paused, flush, verify health, record last successful flush.
+8. Resume if paused, flush, verify health, pause the session, record last successful flush.
 
 ## Git Boundary
 
@@ -32,6 +32,19 @@ Git history belongs to the repository's canonical remotes such as `origin`. Work
 DevSync v1 therefore does not run automatic `git pull` or `git push` during `devsync sync`. If local and remote workspace HEADs differ, DevSync aborts with remediation guidance. Operators must synchronize Git history explicitly with their normal upstream remotes before running filesystem sync.
 
 Peer-clone pulls are unsafe because `git pull <peer-workspace-path> <branch>` writes `FETCH_HEAD` from the peer clone and can fast-forward the local branch while leaving `origin/<branch>` unchanged. The result is a local branch that appears ahead of its canonical upstream even though the mutation came from the peer workspace transport.
+
+## Session Boundary
+
+DevSync uses Mutagen as a synchronization engine, not as always-on replication infrastructure.
+
+`devsync sync` is one-shot. It creates or resumes the resolved Mutagen session, flushes until synchronization has settled, then pauses the session before exiting. This protects branch switching and local experiments from background propagation outside explicit operator intent.
+
+Continuous synchronization is opt-in:
+
+- `devsync attach` creates or resumes the session and leaves it active.
+- `devsync detach` pauses the session and stops background propagation.
+
+Status output reports whether the workspace is in one-shot mode or attached continuous mode.
 
 ## Non-Goals
 

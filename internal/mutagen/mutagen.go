@@ -127,6 +127,14 @@ func Resume(ctx context.Context, runner Runner, sessionName string) error {
 	return nil
 }
 
+func Pause(ctx context.Context, runner Runner, sessionName string) error {
+	_, err := runner.Run(ctx, "sync", "pause", sessionName)
+	if err != nil {
+		return fmt.Errorf("pause mutagen session %s: %w", sessionName, err)
+	}
+	return nil
+}
+
 func Flush(ctx context.Context, runner Runner, sessionName string) error {
 	_, err := runner.Run(ctx, "sync", "flush", sessionName)
 	if err != nil {
