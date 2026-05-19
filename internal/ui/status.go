@@ -12,7 +12,7 @@ import (
 func WriteStatus(w io.Writer, report status.Report) {
 	fmt.Fprintf(w, "Workspace: %s\n", report.Config.Workspace.Name)
 	fmt.Fprintf(w, "Local root: %s\n", report.Workspace.Root)
-	fmt.Fprintf(w, "Remote: %s:%s\n", report.Config.Remote.Target.RenderSSH(), report.Config.Remote.Path)
+	fmt.Fprintf(w, "Remote: %s\n", report.Config.Remote.Target.RenderMutagen(report.Config.Remote.Path))
 	fmt.Fprintf(w, "Remote node: %s\n", report.Config.Remote.Node)
 	fmt.Fprintf(w, "Mapping: %s -> %s\n", report.Config.Mapping.LocalRoot, report.Config.Mapping.RemoteRoot)
 	fmt.Fprintf(w, "Config: global=%s workspace_override=%s\n", loadedLabel(report.Config.Sources.GlobalLoaded), loadedLabel(report.Config.Sources.LocalOverrideFound))

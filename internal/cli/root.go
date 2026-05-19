@@ -293,8 +293,9 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 			return err
 		}
 		fmt.Fprintln(out)
-		fmt.Fprintf(out, "Git: pushing %s to %s:%s\n", report.Local.Branch, report.Config.Remote.Host, report.Config.Remote.Path)
-		if err := git.PushBranch(syncCtx, report.Workspace.Root, report.Config.Remote.Target.RenderSSH(), report.Config.Remote.Path, report.Local.Branch); err != nil {
+		gitRemote := report.Config.Remote.Target.RenderGit(report.Config.Remote.Path)
+		fmt.Fprintf(out, "Git: pushing %s to %s\n", report.Local.Branch, gitRemote)
+		if err := git.PushBranch(syncCtx, report.Workspace.Root, gitRemote, "", report.Local.Branch); err != nil {
 			return err
 		}
 		logger.Debug("sync.git_push", map[string]string{"duration": time.Since(started).String()})
@@ -305,8 +306,9 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 			return err
 		}
 		fmt.Fprintln(out)
-		fmt.Fprintf(out, "Git: pulling %s from %s:%s with --ff-only\n", report.Local.Branch, report.Config.Remote.Host, report.Config.Remote.Path)
-		if err := git.PullBranchFastForward(syncCtx, report.Workspace.Root, report.Config.Remote.Target.RenderSSH(), report.Config.Remote.Path, report.Local.Branch); err != nil {
+		gitRemote := report.Config.Remote.Target.RenderGit(report.Config.Remote.Path)
+		fmt.Fprintf(out, "Git: pulling %s from %s with --ff-only\n", report.Local.Branch, gitRemote)
+		if err := git.PullBranchFastForward(syncCtx, report.Workspace.Root, gitRemote, "", report.Local.Branch); err != nil {
 			return err
 		}
 		logger.Debug("sync.git_pull", map[string]string{"duration": time.Since(started).String()})

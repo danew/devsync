@@ -64,3 +64,21 @@ func TestTargetRenderMutagenUsesSSHURLForPort(t *testing.T) {
 		t.Fatalf("RenderMutagen() = %q, want %q", got, want)
 	}
 }
+
+func TestTargetRenderMutagenOmitsDefaultPort(t *testing.T) {
+	target := Target{User: "dev", Host: "100.72.16.64", Port: "22"}
+	got := target.RenderMutagen("/home/dev/workspace/work/fly-metadata")
+	want := "dev@100.72.16.64:/home/dev/workspace/work/fly-metadata"
+	if got != want {
+		t.Fatalf("RenderMutagen() = %q, want %q", got, want)
+	}
+}
+
+func TestTargetRenderGitOmitsDefaultPort(t *testing.T) {
+	target := Target{User: "dev", Host: "100.72.16.64", Port: "22"}
+	got := target.RenderGit("/home/dev/workspace/work/fly-metadata")
+	want := "dev@100.72.16.64:/home/dev/workspace/work/fly-metadata"
+	if got != want {
+		t.Fatalf("RenderGit() = %q, want %q", got, want)
+	}
+}

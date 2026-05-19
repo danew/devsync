@@ -71,8 +71,33 @@ func (t Target) RenderSSH() string {
 }
 
 func (t Target) RenderMutagen(path string) string {
-	if t.Port == "" || t.Alias != "" {
-		return t.RenderSSH() + ":" + path
+	if t.Alias != "" {
+		return t.Alias + ":" + path
+	}
+	if t.Port == "" || t.Port == "22" {
+		host := t.Host
+		if t.User != "" {
+			host = t.User + "@" + host
+		}
+		return host + ":" + path
+	}
+	user := ""
+	if t.User != "" {
+		user = t.User + "@"
+	}
+	return "ssh://" + user + t.Host + ":" + t.Port + path
+}
+
+func (t Target) RenderGit(path string) string {
+	if t.Alias != "" {
+		return t.Alias + ":" + path
+	}
+	if t.Port == "" || t.Port == "22" {
+		host := t.Host
+		if t.User != "" {
+			host = t.User + "@" + host
+		}
+		return host + ":" + path
 	}
 	user := ""
 	if t.User != "" {

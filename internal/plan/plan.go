@@ -37,9 +37,9 @@ func FromReport(report status.Report, dryRun bool) Plan {
 	}
 	switch {
 	case report.Compare.LocalAhead > 0:
-		ops = append(ops, Operation{Kind: GitMutation, Description: fmt.Sprintf("push %s to %s:%s", report.Local.Branch, report.Config.Remote.Host, report.Config.Remote.Path), Mutates: true})
+		ops = append(ops, Operation{Kind: GitMutation, Description: fmt.Sprintf("push %s to %s", report.Local.Branch, report.Config.Remote.Target.RenderGit(report.Config.Remote.Path)), Mutates: true})
 	case report.Compare.RemoteAhead > 0:
-		ops = append(ops, Operation{Kind: GitMutation, Description: fmt.Sprintf("pull %s from %s:%s with --ff-only", report.Local.Branch, report.Config.Remote.Host, report.Config.Remote.Path), Mutates: true})
+		ops = append(ops, Operation{Kind: GitMutation, Description: fmt.Sprintf("pull %s from %s with --ff-only", report.Local.Branch, report.Config.Remote.Target.RenderGit(report.Config.Remote.Path)), Mutates: true})
 	default:
 		ops = append(ops, Operation{Kind: Check, Description: "no Git ref update required", Mutates: false})
 	}

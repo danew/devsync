@@ -247,6 +247,9 @@ func CheckRemoteBranchVisible(ctx context.Context, runner devssh.Runner, path, e
 }
 
 func GitRemoteURL(host, path string) string {
+	if path == "" {
+		return host
+	}
 	return host + ":" + path
 }
 
