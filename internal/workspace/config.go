@@ -15,6 +15,8 @@ const (
 	GlobalConfigFile  = "config.yaml"
 )
 
+var SupportedWorkspaceConfigFiles = []string{LocalOverrideFile}
+
 var internalDefaultIgnores = []string{".git", "node_modules", "dist", "build", ".cache", ".next", "coverage"}
 
 type Config struct {
@@ -279,6 +281,20 @@ func LoadLocalConfig(repoRoot string) (LocalConfig, bool, string, error) {
 		return LocalConfig{}, false, path, fmt.Errorf("parse workspace override %s: %w", path, err)
 	}
 	return cfg, true, path, nil
+}
+
+func HasWorkspaceConfig(repoRoot string) (bool, string, error) {
+	for _, name := range SupportedWorkspaceConfigFiles {
+		path := filepath.Join(repoRoot, name)
+		_, err := os.Stat(path)
+		if err == nil {
+			return true, path, nil
+		}
+		if !os.IsNotExist(err) {
+			return false, path, err
+		}
+	}
+	return false, filepath.Join(repoRoot, LocalOverrideFile), nil
 }
 
 func WriteConfig(cfg Config) (string, error) {

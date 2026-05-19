@@ -150,6 +150,28 @@ func TestLoadConfigMissingUsesTypedError(t *testing.T) {
 	}
 }
 
+func TestHasWorkspaceConfigAbstractsSupportedFormats(t *testing.T) {
+	repo := t.TempDir()
+	exists, path, err := HasWorkspaceConfig(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("expected no workspace config")
+	}
+	if filepath.Base(path) != LocalOverrideFile {
+		t.Fatalf("default config path = %s", path)
+	}
+	writeFile(t, filepath.Join(repo, LocalOverrideFile), "workspace: example\n")
+	exists, path, err = HasWorkspaceConfig(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists || filepath.Base(path) != LocalOverrideFile {
+		t.Fatalf("expected %s to be discovered, got exists=%v path=%s", LocalOverrideFile, exists, path)
+	}
+}
+
 func mustMkdir(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {

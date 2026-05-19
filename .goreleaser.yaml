@@ -1,0 +1,46 @@
+version: 2
+project_name: devsync
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: devsync
+    main: ./cmd/devsync
+    binary: devsync
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/danew/devsync/internal/buildinfo.Version={{.Version}}
+      - -X github.com/danew/devsync/internal/buildinfo.Commit={{.Commit}}
+      - -X github.com/danew/devsync/internal/buildinfo.Date={{.Date}}
+
+archives:
+  - id: archive
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - docs/**
+
+checksum:
+  name_template: checksums.txt
+
+brews:
+  - name: devsync
+    repository:
+      owner: danew
+      name: homebrew-tap
+    homepage: https://github.com/danew/devsync
+    description: Git-aware workspace synchronization for remote-first development
+    license: MIT
+    test: |
+      system "#{bin}/devsync", "version"

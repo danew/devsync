@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -225,6 +226,9 @@ func newInitCommand() *cobra.Command {
 
 func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Logger) error {
 	logger.Debug("sync.start", map[string]string{"dry_run": fmt.Sprintf("%v", dryRun)})
+	if err := ensureWorkspaceConfigured(ctx, out); err != nil {
+		return err
+	}
 	report, err := buildStatus(ctx)
 	if err != nil {
 		return err
@@ -247,6 +251,7 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 	gitMutated := false
 	switch {
 	case report.Compare.LocalAhead > 0:
+		started := time.Now()
 		if err := git.CheckRemoteBranchVisible(ctx, devssh.Runner{Host: report.Config.Remote.Host}, report.Config.Remote.Path, report.Local.Branch); err != nil {
 			return err
 		}
@@ -255,8 +260,10 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 		if err := git.PushBranch(ctx, report.Workspace.Root, report.Config.Remote.Host, report.Config.Remote.Path, report.Local.Branch); err != nil {
 			return err
 		}
+		logger.Debug("sync.git_push", map[string]string{"duration": time.Since(started).String()})
 		gitMutated = true
 	case report.Compare.RemoteAhead > 0:
+		started := time.Now()
 		if err := git.CheckRemoteBranchVisible(ctx, devssh.Runner{Host: report.Config.Remote.Host}, report.Config.Remote.Path, report.Local.Branch); err != nil {
 			return err
 		}
@@ -265,6 +272,7 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 		if err := git.PullBranchFastForward(ctx, report.Workspace.Root, report.Config.Remote.Host, report.Config.Remote.Path, report.Local.Branch); err != nil {
 			return err
 		}
+		logger.Debug("sync.git_pull", map[string]string{"duration": time.Since(started).String()})
 		gitMutated = true
 	}
 	if gitMutated {
@@ -278,10 +286,12 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 	}
 
 	runner := mutagen.CLIRunner{}
+	started := time.Now()
 	syncState, err := mutagen.EnsureSession(ctx, runner, report.Workspace, report.Config)
 	if err != nil {
 		return err
 	}
+	logger.Debug("sync.ensure_session", map[string]string{"duration": time.Since(started).String(), "session": syncState.SessionName})
 	if syncState.Paused {
 		fmt.Fprintf(out, "Mutagen: resuming session %s\n", syncState.SessionName)
 		if err := mutagen.Resume(ctx, runner, syncState.SessionName); err != nil {
@@ -289,9 +299,11 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 		}
 	}
 	fmt.Fprintf(out, "Mutagen: flushing session %s\n", syncState.SessionName)
+	started = time.Now()
 	if err := mutagen.Flush(ctx, runner, syncState.SessionName); err != nil {
 		return err
 	}
+	logger.Debug("sync.flush", map[string]string{"duration": time.Since(started).String(), "session": syncState.SessionName})
 	syncState, err = mutagen.InspectWithRunner(ctx, runner, report.Config.Workspace.Name)
 	if err != nil {
 		return err
@@ -315,6 +327,53 @@ func runSync(ctx context.Context, out io.Writer, dryRun bool, logger logging.Log
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Sync complete.")
 	return nil
+}
+
+func ensureWorkspaceConfigured(ctx context.Context, out io.Writer) error {
+	ws, err := workspace.Discover(ctx)
+	if err != nil {
+		return err
+	}
+	exists, _, err := workspace.HasWorkspaceConfig(ws.Root)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	cfg, err := workspace.ResolveConfig(ws)
+	if err != nil {
+		return apperrors.NewWithRemedy(apperrors.ErrWorkspaceConfigMissing, "workspace is not configured and convention mapping could not be inferred", "run devsync init --remote-host <host> --remote-path <path> or move the repository under the configured local root")
+	}
+	if !isInteractive() {
+		return apperrors.NewWithRemedy(apperrors.ErrWorkspaceConfigMissing, "workspace is not configured", "run devsync bootstrap --init-workspace")
+	}
+	fmt.Fprintln(out, "No DevSync workspace configuration found.")
+	fmt.Fprintf(out, "Detected Git repository: %s\n", cfg.Workspace.Name)
+	fmt.Fprintln(out, "Inferred mapping:")
+	fmt.Fprintf(out, "  local:  %s\n", ws.Root)
+	fmt.Fprintf(out, "  remote: %s:%s\n", cfg.Remote.Host, cfg.Remote.Path)
+	fmt.Fprint(out, "Initialize this workspace? [y/N] ")
+	answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	if answer != "y" && answer != "yes" {
+		return apperrors.NewWithRemedy(apperrors.ErrWorkspaceConfigMissing, "workspace initialization declined", "run devsync bootstrap --init-workspace when ready")
+	}
+	path, err := workspace.WriteLocalOverride(ws.Root, cfg)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Created workspace config: %s\n", path)
+	fmt.Fprintln(out, "Next steps: devsync doctor; devsync sync --dry-run")
+	return nil
+}
+
+func isInteractive() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 func writePlan(out io.Writer, syncPlan plan.Plan) {
