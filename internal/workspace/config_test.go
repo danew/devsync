@@ -136,6 +136,40 @@ func TestResolveConfigSupportsStructuredSSHOverride(t *testing.T) {
 	}
 }
 
+func TestResolveConfigSupportsPortForwards(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := filepath.Join(home, "remote", "work", "example")
+	mustMkdir(t, repo)
+	writeFile(t, filepath.Join(repo, LocalOverrideFile), `remote:
+  ssh:
+    user: dev
+    host: 100.72.16.64
+    port: "22"
+  path: /home/dev/workspace/work/example
+forward:
+  ports:
+    - 3000
+    - local: 15432
+      remote: 5432
+      host: 127.0.0.1
+`)
+
+	cfg, err := ResolveConfig(Workspace{Name: "example", Root: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Forward.Ports) != 2 {
+		t.Fatalf("ports = %#v", cfg.Forward.Ports)
+	}
+	if cfg.Forward.Ports[0].LocalPort != "3000" || cfg.Forward.Ports[0].RemotePort != "3000" || cfg.Forward.Ports[0].RemoteHost != "127.0.0.1" {
+		t.Fatalf("unexpected scalar forward: %#v", cfg.Forward.Ports[0])
+	}
+	if cfg.Forward.Ports[1].LocalPort != "15432" || cfg.Forward.Ports[1].RemotePort != "5432" {
+		t.Fatalf("unexpected mapped forward: %#v", cfg.Forward.Ports[1])
+	}
+}
+
 func TestResolveConfigForcesGitIgnore(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

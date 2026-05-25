@@ -65,8 +65,23 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(newInitCommand())
 	root.AddCommand(newAttachCommand())
 	root.AddCommand(newDetachCommand())
+	root.AddCommand(newForwardCommand())
 
 	return root
+}
+
+type portForwardRunner interface {
+	Forward(ctx context.Context, forwards []devssh.LocalForward, stdin io.Reader, stdout io.Writer, stderr io.Writer) error
+}
+
+func newForwardCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "forward",
+		Short: "Forward configured ports over SSH",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runForward(cmd.Context(), os.Stdout, os.Stderr)
+		},
+	}
 }
 
 func newAttachCommand() *cobra.Command {
@@ -426,6 +441,53 @@ func runDetachMutagen(ctx context.Context, out io.Writer, runner mutagen.Runner,
 	}
 	fmt.Fprintln(out, "Detached. Background synchronization is stopped.")
 	return nil
+}
+
+func runForward(ctx context.Context, out io.Writer, errOut io.Writer) error {
+	ws, err := workspace.Discover(ctx)
+	if err != nil {
+		return err
+	}
+	cfg, err := workspace.ResolveConfig(ws)
+	if err != nil {
+		return err
+	}
+	return runForwardWithConfig(ctx, out, errOut, os.Stdin, devssh.Runner{Target: cfg.Remote.Target}, cfg)
+}
+
+func runForwardWithConfig(ctx context.Context, out io.Writer, errOut io.Writer, stdin io.Reader, runner portForwardRunner, cfg workspace.Config) error {
+	forwards := configuredForwards(cfg.Forward)
+	if len(forwards) == 0 {
+		return fmt.Errorf("no port forwards configured; add forward.ports to .devsync.yaml")
+	}
+	forwardCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Fprintf(out, "Forwarding SSH ports via %s\n", cfg.Remote.Target.RenderSSH())
+	for _, forward := range forwards {
+		fmt.Fprintf(out, "  - %s\n", forward.RenderSSH())
+	}
+	fmt.Fprintln(out, "Press Ctrl-C to stop forwarding.")
+	if err := runner.Forward(forwardCtx, forwards, stdin, out, errOut); err != nil {
+		if forwardCtx.Err() != nil {
+			fmt.Fprintln(out, "Forwarding stopped.")
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func configuredForwards(cfg workspace.ForwardConfig) []devssh.LocalForward {
+	forwards := []devssh.LocalForward{}
+	for _, port := range cfg.Ports {
+		forwards = append(forwards, devssh.LocalForward{
+			LocalHost:  port.LocalHost,
+			LocalPort:  port.LocalPort,
+			RemoteHost: port.RemoteHost,
+			RemotePort: port.RemotePort,
+		})
+	}
+	return forwards
 }
 
 func confirmInitialSync(out io.Writer, report status.Report) error {

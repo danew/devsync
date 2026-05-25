@@ -33,6 +33,30 @@ func TestTargetSSHArgsUsesUserHostAndPort(t *testing.T) {
 	}
 }
 
+func TestTargetForwardArgsUsesLocalForwardOptions(t *testing.T) {
+	target := Target{User: "dev", Host: "100.72.16.64", Port: "22"}
+	args := target.ForwardArgs([]LocalForward{
+		{LocalPort: "3000", RemoteHost: "127.0.0.1", RemotePort: "3000"},
+		{LocalPort: "5173", RemoteHost: "127.0.0.1", RemotePort: "5173"},
+	})
+	want := []string{"-N", "-L", "3000:127.0.0.1:3000", "-L", "5173:127.0.0.1:5173", "-p", "22", "dev@100.72.16.64"}
+	if len(args) != len(want) {
+		t.Fatalf("args = %#v", args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args = %#v, want %#v", args, want)
+		}
+	}
+}
+
+func TestLocalForwardRenderSSHSupportsBindHost(t *testing.T) {
+	forward := LocalForward{LocalHost: "127.0.0.1", LocalPort: "15432", RemoteHost: "127.0.0.1", RemotePort: "5432"}
+	if got := forward.RenderSSH(); got != "127.0.0.1:15432:127.0.0.1:5432" {
+		t.Fatalf("RenderSSH() = %q", got)
+	}
+}
+
 func TestTargetSCPArgsUsesCapitalPortFlag(t *testing.T) {
 	target := Target{User: "dev", Host: "100.72.16.64", Port: "2222"}
 	args := target.SCPArgs("src", "/tmp/dst")

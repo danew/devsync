@@ -77,6 +77,7 @@ See `docs/examples.md` for configuration examples.
 - `devsync sync`: validate Git history equality, flush Mutagen, then pause synchronization.
 - `devsync attach`: intentionally enable continuous synchronization.
 - `devsync detach`: pause continuous synchronization.
+- `devsync forward`: start configured SSH local port forwards until interrupted.
 - `devsync doctor`: validate local and remote prerequisites.
 - `devsync session ls`: list Mutagen sync sessions.
 - `devsync session inspect`: inspect the resolved Mutagen session.

@@ -30,7 +30,16 @@ remote:
 sync:
   ignores:
     - .env.local
+forward:
+  ports:
+    - 3000
+    - 5173
+    - local: 15432
+      remote: 5432
+      host: 127.0.0.1
 ```
+
+`devsync forward` starts one SSH tunnel using the resolved `remote.ssh` target. Scalar ports map the same local and remote port on `127.0.0.1`; mapping entries can use different local and remote ports.
 
 ## First Sync
 

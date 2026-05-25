@@ -24,6 +24,7 @@ type Config struct {
 	Workspace WorkspaceIdentity
 	Remote    RemoteConfig
 	Sync      SyncConfig
+	Forward   ForwardConfig
 	Mapping   MappingConfig
 	Sources   ConfigSources
 }
@@ -49,6 +50,21 @@ type SSHConfig struct {
 type SyncConfig struct {
 	Mode    string
 	Ignores []string
+}
+
+type ForwardConfig struct {
+	Ports []PortForward `yaml:"ports"`
+}
+
+func (f ForwardConfig) IsZero() bool {
+	return len(f.Ports) == 0
+}
+
+type PortForward struct {
+	LocalHost  string `yaml:"local_host,omitempty"`
+	LocalPort  string `yaml:"local,omitempty"`
+	RemoteHost string `yaml:"host,omitempty"`
+	RemotePort string `yaml:"remote,omitempty"`
 }
 
 type MappingConfig struct {
@@ -103,6 +119,7 @@ type LocalConfig struct {
 	Workspace string            `yaml:"workspace"`
 	Remote    LocalRemoteConfig `yaml:"remote"`
 	Sync      LocalSyncConfig   `yaml:"sync"`
+	Forward   ForwardConfig     `yaml:"forward,omitempty"`
 	Ignore    []string          `yaml:"ignore"`
 }
 
@@ -201,6 +218,7 @@ func ResolveConfigFromLayers(ws Workspace, global GlobalConfig, local LocalConfi
 		if local.Sync.Mode != "" {
 			cfg.Sync.Mode = local.Sync.Mode
 		}
+		cfg.Forward = normalizeForwardConfig(local.Forward)
 	}
 
 	if localFound && local.Remote.Path != "" {
@@ -248,6 +266,71 @@ func normalizeRemoteTarget(host string, ssh SSHConfig) devssh.Target {
 
 func formatSSHTarget(ssh SSHConfig) string {
 	return normalizeRemoteTarget("", ssh).String()
+}
+
+func (p *PortForward) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		port := strings.TrimSpace(node.Value)
+		if port == "" {
+			return fmt.Errorf("forward port cannot be empty")
+		}
+		*p = PortForward{LocalPort: port, RemoteHost: "127.0.0.1", RemotePort: port}
+		return nil
+	case yaml.MappingNode:
+		values := map[string]string{}
+		for i := 0; i < len(node.Content); i += 2 {
+			key := strings.TrimSpace(node.Content[i].Value)
+			value := strings.TrimSpace(node.Content[i+1].Value)
+			values[key] = value
+		}
+		*p = PortForward{
+			LocalHost:  values["local_host"],
+			LocalPort:  firstNonEmpty(values["local"], values["local_port"]),
+			RemoteHost: firstNonEmpty(values["host"], values["remote_host"], "127.0.0.1"),
+			RemotePort: firstNonEmpty(values["remote"], values["remote_port"]),
+		}
+		if p.LocalPort == "" {
+			return fmt.Errorf("forward port mapping requires local")
+		}
+		if p.RemotePort == "" {
+			p.RemotePort = p.LocalPort
+		}
+		return nil
+	default:
+		return fmt.Errorf("forward port must be a port number or mapping")
+	}
+}
+
+func normalizeForwardConfig(cfg ForwardConfig) ForwardConfig {
+	ports := []PortForward{}
+	for _, port := range cfg.Ports {
+		port.LocalHost = strings.TrimSpace(port.LocalHost)
+		port.LocalPort = strings.TrimSpace(port.LocalPort)
+		port.RemoteHost = strings.TrimSpace(port.RemoteHost)
+		port.RemotePort = strings.TrimSpace(port.RemotePort)
+		if port.RemoteHost == "" {
+			port.RemoteHost = "127.0.0.1"
+		}
+		if port.RemotePort == "" {
+			port.RemotePort = port.LocalPort
+		}
+		if port.LocalPort == "" {
+			continue
+		}
+		ports = append(ports, port)
+	}
+	return ForwardConfig{Ports: ports}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func LoadGlobalConfig() (GlobalConfig, ConfigSources, error) {

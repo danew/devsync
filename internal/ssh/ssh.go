@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -30,6 +31,13 @@ type Target struct {
 	Host  string
 	Port  string
 	Alias string
+}
+
+type LocalForward struct {
+	LocalHost  string
+	LocalPort  string
+	RemoteHost string
+	RemotePort string
 }
 
 func ParseTarget(value string) Target {
@@ -68,6 +76,25 @@ func (t Target) RenderSSH() string {
 		host += ":" + t.Port
 	}
 	return host
+}
+
+func (t Target) ForwardArgs(forwards []LocalForward) []string {
+	args := []string{"-N"}
+	for _, forward := range forwards {
+		args = append(args, "-L", forward.RenderSSH())
+	}
+	if t.Port != "" {
+		args = append(args, "-p", t.Port)
+	}
+	return append(args, t.hostArg())
+}
+
+func (f LocalForward) RenderSSH() string {
+	parts := []string{f.LocalPort, f.RemoteHost, f.RemotePort}
+	if f.LocalHost != "" {
+		parts = append([]string{f.LocalHost}, parts...)
+	}
+	return strings.Join(parts, ":")
 }
 
 func (t Target) RenderMutagen(path string) string {
@@ -111,17 +138,22 @@ func (t Target) RenderSCP(path string) string {
 }
 
 func (t Target) sshArgs(command string) []string {
-	host := t.Host
-	if t.Alias != "" {
-		host = t.Alias
-	} else if t.User != "" {
-		host = t.User + "@" + host
-	}
 	args := []string{}
 	if t.Port != "" {
 		args = append(args, "-p", t.Port)
 	}
-	return append(args, host, command)
+	return append(args, t.hostArg(), command)
+}
+
+func (t Target) hostArg() string {
+	host := t.Host
+	if t.Alias != "" {
+		return t.Alias
+	}
+	if t.User != "" {
+		host = t.User + "@" + host
+	}
+	return host
 }
 
 func (t Target) SCPDestination(path string) string {
@@ -185,6 +217,15 @@ func (r Runner) RunRaw(ctx context.Context, command string) (Result, error) {
 	}
 	traceSSH(target, command, "exit", result.Stdout, result.Stderr, 0)
 	return result, nil
+}
+
+func (r Runner) Forward(ctx context.Context, forwards []LocalForward, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+	target := r.target()
+	cmd := exec.CommandContext(ctx, "ssh", target.ForwardArgs(forwards)...)
+	cmd.Stdin = stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	return cmd.Run()
 }
 
 func traceSSH(target Target, command string, phase string, stdout string, stderr string, exitCode int) {

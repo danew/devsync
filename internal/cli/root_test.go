@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,7 @@ import (
 
 func TestRootCommandRegistersDoctorAndDryRun(t *testing.T) {
 	root := newRootCommand()
-	for _, command := range []string{"doctor", "bootstrap", "version", "session", "init-remote", "attach", "detach"} {
+	for _, command := range []string{"doctor", "bootstrap", "version", "session", "init-remote", "attach", "detach", "forward"} {
 		if _, _, err := root.Find([]string{command}); err != nil {
 			t.Fatalf("%s command missing: %v", command, err)
 		}
@@ -161,6 +162,40 @@ func TestRunDetachMutagenPausesActiveSession(t *testing.T) {
 	}
 }
 
+func TestRunForwardWithConfigStartsConfiguredForwards(t *testing.T) {
+	runner := &fakeForwardRunner{}
+	cfg := workspace.Config{
+		Remote: workspace.RemoteConfig{Target: devssh.Target{User: "dev", Host: "100.72.16.64", Port: "22"}},
+		Forward: workspace.ForwardConfig{Ports: []workspace.PortForward{
+			{LocalPort: "3000", RemoteHost: "127.0.0.1", RemotePort: "3000"},
+			{LocalPort: "5173", RemoteHost: "127.0.0.1", RemotePort: "5173"},
+		}},
+	}
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+
+	if err := runForwardWithConfig(t.Context(), &out, &errOut, strings.NewReader(""), runner, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(runner.forwards) != 2 {
+		t.Fatalf("forwards = %#v", runner.forwards)
+	}
+	if got := runner.forwards[0].RenderSSH(); got != "3000:127.0.0.1:3000" {
+		t.Fatalf("first forward = %q", got)
+	}
+	if !strings.Contains(out.String(), "Forwarding SSH ports via dev@100.72.16.64:22") {
+		t.Fatalf("expected forwarding output, got:\n%s", out.String())
+	}
+}
+
+func TestRunForwardWithConfigRequiresConfiguredForwards(t *testing.T) {
+	err := runForwardWithConfig(t.Context(), &bytes.Buffer{}, &bytes.Buffer{}, strings.NewReader(""), &fakeForwardRunner{}, workspace.Config{})
+	if err == nil || !strings.Contains(err.Error(), "no port forwards configured") {
+		t.Fatalf("expected missing forwards error, got %v", err)
+	}
+}
+
 func lifecycleReport() status.Report {
 	return status.Report{
 		Workspace: workspace.Workspace{Root: "/local/steel-api"},
@@ -171,6 +206,15 @@ func lifecycleReport() status.Report {
 		Sync: mutagen.State{SessionName: "devsync-steel-api", Healthy: true},
 		Safe: true,
 	}
+}
+
+type fakeForwardRunner struct {
+	forwards []devssh.LocalForward
+}
+
+func (r *fakeForwardRunner) Forward(ctx context.Context, forwards []devssh.LocalForward, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+	r.forwards = append([]devssh.LocalForward{}, forwards...)
+	return nil
 }
 
 type fakeMutagenRunner struct {

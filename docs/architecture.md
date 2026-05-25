@@ -48,4 +48,4 @@ Status output reports whether the workspace is in one-shot mode or attached cont
 
 ## Non-Goals
 
-DevSync v1 intentionally excludes migration, daemons, distributed sync, service forwarding, tmux orchestration, TypeScript runtime config, automatic merge/rebase, and automatic branch switching.
+DevSync v1 intentionally excludes migration, daemons, distributed sync, tmux orchestration, TypeScript runtime config, automatic merge/rebase, and automatic branch switching.
